@@ -1,4 +1,4 @@
-use std::ops::Range;
+use std::{borrow::Cow, ops::Range};
 
 use gpui::{prelude::*, *};
 use unicode_segmentation::UnicodeSegmentation;
@@ -29,25 +29,27 @@ actions!(
 const LINE_HEIGHT: f32 = 22.;
 
 pub fn bind_keys(cx: &mut App) {
-    cx.bind_keys([
-        KeyBinding::new("backspace", Backspace, Some("Composer")),
-        KeyBinding::new("delete", Delete, Some("Composer")),
-        KeyBinding::new("left", Left, Some("Composer")),
-        KeyBinding::new("right", Right, Some("Composer")),
-        KeyBinding::new("up", Up, Some("Composer")),
-        KeyBinding::new("down", Down, Some("Composer")),
-        KeyBinding::new("shift-left", SelectLeft, Some("Composer")),
-        KeyBinding::new("shift-right", SelectRight, Some("Composer")),
-        KeyBinding::new("shift-up", SelectUp, Some("Composer")),
-        KeyBinding::new("shift-down", SelectDown, Some("Composer")),
-        KeyBinding::new("cmd-a", SelectAll, Some("Composer")),
-        KeyBinding::new("cmd-v", Paste, Some("Composer")),
-        KeyBinding::new("cmd-c", Copy, Some("Composer")),
-        KeyBinding::new("cmd-x", Cut, Some("Composer")),
-        KeyBinding::new("cmd-left", Home, Some("Composer")),
-        KeyBinding::new("cmd-right", End, Some("Composer")),
-        KeyBinding::new("shift-enter", Newline, Some("Composer")),
-    ]);
+    for context in ["Composer", "ChatName"] {
+        cx.bind_keys([
+            KeyBinding::new("backspace", Backspace, Some(context)),
+            KeyBinding::new("delete", Delete, Some(context)),
+            KeyBinding::new("left", Left, Some(context)),
+            KeyBinding::new("right", Right, Some(context)),
+            KeyBinding::new("up", Up, Some(context)),
+            KeyBinding::new("down", Down, Some(context)),
+            KeyBinding::new("shift-left", SelectLeft, Some(context)),
+            KeyBinding::new("shift-right", SelectRight, Some(context)),
+            KeyBinding::new("shift-up", SelectUp, Some(context)),
+            KeyBinding::new("shift-down", SelectDown, Some(context)),
+            KeyBinding::new("cmd-a", SelectAll, Some(context)),
+            KeyBinding::new("cmd-v", Paste, Some(context)),
+            KeyBinding::new("cmd-c", Copy, Some(context)),
+            KeyBinding::new("cmd-x", Cut, Some(context)),
+            KeyBinding::new("cmd-left", Home, Some(context)),
+            KeyBinding::new("cmd-right", End, Some(context)),
+        ]);
+    }
+    cx.bind_keys([KeyBinding::new("shift-enter", Newline, Some("Composer"))]);
 }
 
 struct InputLine {
@@ -68,6 +70,8 @@ pub struct Input {
     content_height: Pixels,
     reveal_cursor: bool,
     dragging: bool,
+    single_line: bool,
+    scroll_x: Pixels,
 }
 
 impl Input {
@@ -84,7 +88,17 @@ impl Input {
             content_height: px(0.),
             reveal_cursor: true,
             dragging: false,
+            single_line: false,
+            scroll_x: px(0.),
         }
+    }
+
+    pub fn single_line(text: String, cx: &mut Context<Self>) -> Self {
+        let mut input = Self::new(cx);
+        input.selection = 0..text.len();
+        input.text = text;
+        input.single_line = true;
+        input
     }
 
     pub fn clear(&mut self, cx: &mut Context<Self>) {
@@ -92,6 +106,7 @@ impl Input {
         self.selection = 0..0;
         self.marked = None;
         self.scroll = px(0.);
+        self.scroll_x = px(0.);
         self.content_height = px(0.);
         self.reveal_cursor = true;
         cx.notify();
@@ -308,7 +323,12 @@ impl Input {
         self.bounds = bounds;
         let placeholder = self.text.is_empty();
         let text: SharedString = if placeholder {
-            "Send a message…".into()
+            if self.single_line {
+                "Chat name"
+            } else {
+                "Send a message…"
+            }
+            .into()
         } else {
             self.text.clone().into()
         };
@@ -341,11 +361,13 @@ impl Input {
                 strikethrough: None,
             })
             .collect();
-        let Ok(shaped) =
-            window
-                .text_system()
-                .shape_text(text, px(14.), &runs, Some(bounds.size.width), None)
-        else {
+        let Ok(shaped) = window.text_system().shape_text(
+            text,
+            px(14.),
+            &runs,
+            (!self.single_line).then_some(bounds.size.width),
+            None,
+        ) else {
             return;
         };
         self.lines.clear();
@@ -369,10 +391,17 @@ impl Input {
             if caret.bottom() - self.scroll > bounds.bottom() {
                 self.scroll = caret.bottom() - bounds.bottom();
             }
+            if self.single_line {
+                self.scroll_x = self.scroll_x.min(caret.left() - bounds.left()).max(px(0.));
+                if caret.right() - self.scroll_x > bounds.right() {
+                    self.scroll_x = caret.right() - bounds.right();
+                }
+            }
         }
         self.scroll = self.scroll.clamp(px(0.), self.max_scroll());
         for entry in &mut self.lines {
             entry.origin.y -= self.scroll;
+            entry.origin.x -= self.scroll_x;
         }
         window.handle_input(
             &self.focus,
@@ -452,11 +481,16 @@ impl EntityInputHandler for Input {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let text = if self.single_line {
+            Cow::Owned(text.replace(['\n', '\r'], " "))
+        } else {
+            Cow::Borrowed(text)
+        };
         let range = range
             .map(|r| self.range_to_utf8(r))
             .or(self.marked.clone())
             .unwrap_or(self.selection.clone());
-        self.text.replace_range(range.clone(), text);
+        self.text.replace_range(range.clone(), &text);
         self.marked = None;
         self.move_to(range.start + text.len(), false, cx);
     }
@@ -514,7 +548,11 @@ impl Render for Input {
             .h_full()
             .min_h_0()
             .min_w_0()
-            .key_context("Composer")
+            .key_context(if self.single_line {
+                "ChatName"
+            } else {
+                "Composer"
+            })
             .track_focus(&self.focus)
             .cursor(CursorStyle::IBeam)
             .on_action(cx.listener(Self::left))

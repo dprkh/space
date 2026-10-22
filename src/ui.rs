@@ -8,7 +8,7 @@ use async_channel::{Receiver, Sender};
 use gpui::{prelude::*, *};
 use space::{
     agent::{Command, Event, SidebarCommand},
-    model::{CONTEXT_WINDOW_TOKENS, Chat, Role, Status},
+    model::{CONTEXT_WINDOW_TOKENS, Chat, Model, Role, Status},
     store::{ChatSummary, MAX_COMPOSER_HEIGHT, MIN_COMPOSER_HEIGHT, UiSettings},
 };
 use tokio_util::sync::CancellationToken;
@@ -23,7 +23,19 @@ use crate::{
 
 actions!(
     space_ui,
-    [SendMessage, Stop, NewChat, ToggleSidebar, Quit, Close]
+    [
+        SendMessage,
+        Stop,
+        NewChat,
+        ToggleSidebar,
+        ConfirmRename,
+        CancelRename,
+        NextModel,
+        PreviousModel,
+        ChooseModel,
+        Quit,
+        Close
+    ]
 );
 
 pub fn run(
@@ -36,7 +48,12 @@ pub fn run(
         input::bind_keys(cx);
         cx.bind_keys([
             KeyBinding::new("enter", SendMessage, Some("Composer")),
+            KeyBinding::new("enter", ConfirmRename, Some("ChatName")),
+            KeyBinding::new("escape", CancelRename, Some("ChatName")),
             KeyBinding::new("escape", Stop, None),
+            KeyBinding::new("down", NextModel, Some("ModelMenu")),
+            KeyBinding::new("up", PreviousModel, Some("ModelMenu")),
+            KeyBinding::new("enter", ChooseModel, Some("ModelMenu")),
             KeyBinding::new("cmd-n", NewChat, None),
             KeyBinding::new("cmd-b", ToggleSidebar, None),
             KeyBinding::new("cmd-q", Quit, None),
@@ -75,6 +92,12 @@ pub fn run(
 }
 
 struct SidebarResize;
+
+struct RenameDialog {
+    chat_id: Uuid,
+    input: Entity<Input>,
+    error: Option<String>,
+}
 
 #[derive(Clone, Copy)]
 struct ComposerResize {
@@ -134,7 +157,6 @@ struct Workspace {
     commands: Sender<Command>,
     sidebar_commands: Sender<SidebarCommand>,
     shutdown: CancellationToken,
-    cancel: Option<CancellationToken>,
     input: Entity<Input>,
     chat: Option<Chat>,
     markdown: Vec<MessageText>,
@@ -144,6 +166,13 @@ struct Workspace {
     change_indices: HashMap<(usize, usize), usize>,
     collapsed_changes: HashSet<usize>,
     chats: Vec<ChatSummary>,
+    runs: HashMap<Uuid, Uuid>,
+    archived: bool,
+    chat_menu: Option<(Uuid, Point<Pixels>)>,
+    model_menu: Option<Point<Pixels>>,
+    model_menu_focus: FocusHandle,
+    model_menu_index: usize,
+    rename: Option<RenameDialog>,
     sidebar: bool,
     sidebar_width: Pixels,
     composer_height: Pixels,
@@ -203,7 +232,6 @@ impl Workspace {
             commands,
             sidebar_commands,
             shutdown,
-            cancel: None,
             input,
             chat: None,
             markdown: Vec::new(),
@@ -213,6 +241,13 @@ impl Workspace {
             change_indices: HashMap::new(),
             collapsed_changes: HashSet::new(),
             chats: Vec::new(),
+            runs: HashMap::new(),
+            archived: false,
+            chat_menu: None,
+            model_menu: None,
+            model_menu_focus: cx.focus_handle(),
+            model_menu_index: 0,
+            rename: None,
             sidebar: true,
             sidebar_width: px(UiSettings::default().sidebar_width),
             composer_height: px(UiSettings::default().composer_height),
@@ -234,7 +269,29 @@ impl Workspace {
 
     fn event(&mut self, event: Event, cx: &mut Context<Self>) {
         match event {
-            Event::Chats(chats) => self.chats = chats,
+            Event::Chats(chats) => {
+                self.runs
+                    .retain(|id, _| chats.iter().any(|chat| chat.id == *id));
+                self.chats = chats;
+            }
+            Event::Activity {
+                chat_id,
+                run_id,
+                timestamp,
+            } => {
+                if self.runs.get(&chat_id) == Some(&run_id) {
+                    if let Some(summary) = self.chats.iter_mut().find(|chat| chat.id == chat_id) {
+                        summary.updated_at = timestamp;
+                    }
+                    self.chats
+                        .sort_by_key(|chat| std::cmp::Reverse(chat.updated_at));
+                    if let Some(chat) = &mut self.chat
+                        && chat.id == chat_id
+                    {
+                        chat.updated_at = timestamp;
+                    }
+                }
+            }
             Event::UiSettings(settings) => {
                 if !self.settings_dirty {
                     self.sidebar_width = px(settings.sidebar_width);
@@ -247,7 +304,35 @@ impl Workspace {
                 self.tree
                     .update(cx, |tree, cx| tree.directory(path, listing, cx));
             }
-            Event::State { chat, opened } => {
+            Event::State {
+                chat,
+                opened,
+                run_id,
+            } => {
+                if let Some(run_id) = run_id {
+                    self.runs.insert(chat.id, run_id);
+                } else {
+                    self.runs.remove(&chat.id);
+                }
+                let summary = ChatSummary::from(chat.as_ref());
+                if let Some(existing) = self.chats.iter_mut().find(|item| item.id == chat.id) {
+                    *existing = summary;
+                } else {
+                    self.chats.push(summary);
+                }
+                self.chats
+                    .sort_by_key(|item| std::cmp::Reverse(item.updated_at));
+                if !opened
+                    && self
+                        .chat
+                        .as_ref()
+                        .is_none_or(|selected| selected.id != chat.id)
+                {
+                    return;
+                }
+                if self.chat.is_none() {
+                    self.archived = chat.archived;
+                }
                 if opened {
                     self.pending_open = false;
                 }
@@ -267,6 +352,7 @@ impl Workspace {
                                 .unwrap_or(old.contents.len().min(chat.contents.len()))
                         });
                 if changed {
+                    self.model_menu = None;
                     self.input.update(cx, |input, cx| input.clear(cx));
                     self.collapsed_thoughts.clear();
                     self.collapsed_changes.clear();
@@ -284,14 +370,6 @@ impl Workspace {
                         .insert((change.content_index, change.part_index), index);
                     changed_content = changed_content.min(change.content_index);
                 }
-                let summary = ChatSummary::from(chat.as_ref());
-                if let Some(existing) = self.chats.iter_mut().find(|item| item.id == chat.id) {
-                    *existing = summary;
-                } else {
-                    self.chats.push(summary);
-                }
-                self.chats
-                    .sort_by_key(|item| std::cmp::Reverse(item.updated_at));
                 if !self.pending_open {
                     self.waiting = false;
                 }
@@ -355,16 +433,30 @@ impl Workspace {
                 }
                 self.refresh_rows(changed_content, changed);
             }
-            Event::Delta(text) => {
-                if let Some(chat) = &mut self.chat {
+            Event::Delta {
+                chat_id,
+                run_id,
+                text,
+            } => {
+                if self.runs.get(&chat_id) == Some(&run_id)
+                    && let Some(chat) = &mut self.chat
+                    && chat.id == chat_id
+                {
                     chat.partial.push_str(&text);
                     self.partial_markdown.answer.update(&chat.partial, true);
                     let content_index = chat.contents.len();
                     self.refresh_rows(content_index, false);
                 }
             }
-            Event::ThoughtDelta(text) => {
-                if let Some(chat) = &mut self.chat {
+            Event::ThoughtDelta {
+                chat_id,
+                run_id,
+                text,
+            } => {
+                if self.runs.get(&chat_id) == Some(&run_id)
+                    && let Some(chat) = &mut self.chat
+                    && chat.id == chat_id
+                {
                     chat.partial_thoughts.push_str(&text);
                     self.partial_markdown
                         .thoughts
@@ -373,9 +465,29 @@ impl Workspace {
                     self.refresh_rows(content_index, false);
                 }
             }
-            Event::ContextTokens(tokens) => {
-                if let Some(chat) = &mut self.chat {
+            Event::ContextTokens {
+                chat_id,
+                run_id,
+                tokens,
+                model,
+            } => {
+                if self.runs.get(&chat_id) == Some(&run_id)
+                    && let Some(chat) = &mut self.chat
+                    && chat.id == chat_id
+                {
                     chat.context_tokens = Some(tokens);
+                    chat.context_model = model;
+                }
+            }
+            Event::RunError {
+                chat_id,
+                run_id,
+                error,
+            } => {
+                if self.runs.get(&chat_id) == Some(&run_id)
+                    && self.chat.as_ref().is_some_and(|chat| chat.id == chat_id)
+                {
+                    self.error = Some(error);
                 }
             }
             Event::Error(error) => {
@@ -392,25 +504,37 @@ impl Workspace {
             .is_some_and(|chat| chat.status == Status::Running)
     }
     fn stop(&mut self) {
-        if let Some(cancel) = self.cancel.take() {
-            cancel.cancel();
+        if let Some(chat) = &self.chat
+            && self.commands.try_send(Command::Stop(chat.id)).is_err()
+        {
+            self.error = Some("The agent worker is unavailable".into());
         }
     }
 
     fn command(&mut self, command: Command, cx: &mut Context<Self>) {
-        self.stop();
-        self.pending_open = true;
+        if self.pending_open {
+            return;
+        }
+        self.chat_menu = None;
+        self.model_menu = None;
         self.error = None;
         if self.commands.try_send(command).is_err() {
             self.error = Some("The agent worker is unavailable".into());
         } else {
+            self.pending_open = true;
             self.waiting = true;
         }
         cx.notify();
     }
 
     fn send(&mut self, _: &SendMessage, window: &mut Window, cx: &mut Context<Self>) {
-        if self.running() || self.waiting || self.input.read(cx).is_composing() {
+        if self.running()
+            || self.waiting
+            || self.rename.is_some()
+            || self.chat_menu.is_some()
+            || self.model_menu.is_some()
+            || self.input.read(cx).is_composing()
+        {
             return;
         }
         let text = self.input.read(cx).text.trim().to_owned();
@@ -420,20 +544,17 @@ impl Workspace {
         let Some(chat) = &self.chat else {
             return;
         };
+        if chat.archived {
+            return;
+        }
         let chat_id = chat.id;
-        let cancel = self.shutdown.child_token();
         if self
             .commands
-            .try_send(Command::Send {
-                chat_id,
-                text,
-                cancel: cancel.clone(),
-            })
+            .try_send(Command::Send { chat_id, text })
             .is_err()
         {
             self.error = Some("The agent worker is unavailable".into());
         } else {
-            self.cancel = Some(cancel);
             self.waiting = true;
             self.error = None;
             self.input.update(cx, |input, cx| input.clear(cx));
@@ -446,6 +567,10 @@ impl Workspace {
     }
 
     fn new_chat(&mut self, _: &NewChat, _: &mut Window, cx: &mut Context<Self>) {
+        if self.rename.is_some() || self.pending_open {
+            return;
+        }
+        self.archived = false;
         self.command(Command::New, cx);
     }
 
@@ -455,6 +580,317 @@ impl Workspace {
             item_ix: self.rows.len(),
             offset_in_item: px(0.),
         });
+    }
+
+    fn edit_chat(&mut self, command: Command, cx: &mut Context<Self>) {
+        self.chat_menu = None;
+        self.error = None;
+        if self.commands.try_send(command).is_err() {
+            self.error = Some("The agent worker is unavailable".into());
+        }
+        cx.notify();
+    }
+
+    fn start_rename(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(chat) = self.chats.iter().find(|chat| chat.id == id) else {
+            return;
+        };
+        let title = chat.title.clone();
+        let input = cx.new(|cx| Input::single_line(title, cx));
+        input.read(cx).focus_handle(cx).focus(window);
+        self.rename = Some(RenameDialog {
+            chat_id: id,
+            input,
+            error: None,
+        });
+        self.chat_menu = None;
+        cx.notify();
+    }
+
+    fn confirm_rename(&mut self, _: &ConfirmRename, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(dialog) = &mut self.rename else {
+            return;
+        };
+        if dialog.input.read(cx).is_composing() {
+            return;
+        }
+        let title = dialog.input.read(cx).text.trim().to_owned();
+        if title.is_empty() {
+            dialog.error = Some("Enter a chat name".into());
+            cx.notify();
+            return;
+        }
+        let chat_id = dialog.chat_id;
+        self.edit_chat(Command::Rename { chat_id, title }, cx);
+        self.cancel_rename(&CancelRename, window, cx);
+    }
+
+    fn cancel_rename(&mut self, _: &CancelRename, window: &mut Window, cx: &mut Context<Self>) {
+        self.rename = None;
+        self.input.read(cx).focus_handle(cx).focus(window);
+        cx.notify();
+    }
+
+    fn close_model_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.model_menu = None;
+        self.input.read(cx).focus_handle(cx).focus(window);
+        cx.notify();
+    }
+
+    fn choose_model(&mut self, _: &ChooseModel, window: &mut Window, cx: &mut Context<Self>) {
+        if self.model_menu.is_none() {
+            return;
+        }
+        if let Some(chat) = &self.chat {
+            let command = Command::SetModel {
+                chat_id: chat.id,
+                model: Model::ALL[self.model_menu_index],
+            };
+            self.edit_chat(command, cx);
+        }
+        self.close_model_menu(window, cx);
+    }
+
+    fn model_selector(&self, cx: &Context<Self>) -> impl IntoElement {
+        let selected = self
+            .chat
+            .as_ref()
+            .and_then(|chat| Model::from_id(&chat.model));
+        let name = selected.map_or("Choose model", Model::name);
+        let next = self
+            .chat
+            .as_ref()
+            .is_some_and(|chat| self.running() && chat.model != chat.partial_model.id());
+        button(
+            "model-selector",
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(if next {
+                    format!("Next: {name}")
+                } else {
+                    name.into()
+                })
+                .child(disclosure_arrow(true)),
+        )
+        .flex_shrink_0()
+        .on_click(cx.listener(|this, event: &ClickEvent, window, cx| {
+            cx.stop_propagation();
+            if this.model_menu.is_some() {
+                this.close_model_menu(window, cx);
+            } else if !this.pending_open && this.chat.is_some() {
+                this.chat_menu = None;
+                this.model_menu_index = Model::ALL
+                    .iter()
+                    .position(|model| {
+                        this.chat
+                            .as_ref()
+                            .is_some_and(|chat| chat.model == model.id())
+                    })
+                    .unwrap_or(0);
+                this.model_menu = Some(event.position() - point(px(0.), px(18.)));
+                this.model_menu_focus.focus(window);
+                cx.notify();
+            }
+        }))
+    }
+
+    fn render_model_menu(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let position = self.model_menu?;
+        Some(
+            deferred(
+                anchored()
+                    .anchor(Corner::BottomRight)
+                    .position(position)
+                    .child(
+                        div()
+                            .id("model-menu")
+                            .key_context("ModelMenu")
+                            .track_focus(&self.model_menu_focus)
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .w(px(184.))
+                            .p_1()
+                            .bg(rgb(0x303039))
+                            .border_1()
+                            .border_color(rgb(0x494957))
+                            .rounded_md()
+                            .shadow_lg()
+                            .occlude()
+                            .on_mouse_down_out(
+                                cx.listener(|this, _, window, cx| {
+                                    this.close_model_menu(window, cx)
+                                }),
+                            )
+                            .children(Model::ALL.into_iter().enumerate().map(|(index, model)| {
+                                let selected = self
+                                    .chat
+                                    .as_ref()
+                                    .is_some_and(|chat| chat.model == model.id());
+                                div()
+                                    .id(index)
+                                    .h(px(28.))
+                                    .px_2()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .rounded_sm()
+                                    .text_xs()
+                                    .cursor_pointer()
+                                    .when(index == self.model_menu_index, |view| {
+                                        view.bg(rgb(0x494957))
+                                    })
+                                    .hover(|style| style.bg(rgb(0x494957)))
+                                    .child(model.name())
+                                    .when(selected, |view| view.child("✓"))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        cx.stop_propagation();
+                                        this.model_menu_index = index;
+                                        this.choose_model(&ChooseModel, window, cx);
+                                    }))
+                            })),
+                    ),
+            )
+            .into_any_element(),
+        )
+    }
+
+    fn render_chat_menu(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let (id, position) = self.chat_menu?;
+        let chat = self.chats.iter().find(|chat| chat.id == id)?;
+        let archived = chat.archived;
+        Some(
+            deferred(
+                anchored().position(position).child(
+                    div()
+                        .id("chat-menu")
+                        .w(px(144.))
+                        .p_1()
+                        .bg(rgb(0x303039))
+                        .border_1()
+                        .border_color(rgb(0x494957))
+                        .rounded_md()
+                        .shadow_lg()
+                        .occlude()
+                        .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                            this.chat_menu = None;
+                            cx.notify();
+                        }))
+                        .children(
+                            [
+                                "Rename",
+                                if archived { "Unarchive" } else { "Archive" },
+                                "Delete",
+                            ]
+                            .into_iter()
+                            .enumerate()
+                            .map(|(action, label)| {
+                                div()
+                                    .id(action)
+                                    .h(px(28.))
+                                    .px_2()
+                                    .flex()
+                                    .items_center()
+                                    .rounded_sm()
+                                    .text_xs()
+                                    .text_color(rgb(if action == 2 { 0xd5a0a0 } else { 0xe5e5e8 }))
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(rgb(0x494957)))
+                                    .child(label)
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        cx.stop_propagation();
+                                        this.chat_menu = None;
+                                        match action {
+                                            0 => this.start_rename(id, window, cx),
+                                            1 => this.edit_chat(
+                                                Command::SetArchived {
+                                                    chat_id: id,
+                                                    archived: !archived,
+                                                },
+                                                cx,
+                                            ),
+                                            _ => this.confirm_delete_chat(id, window, cx),
+                                        }
+                                    }))
+                            }),
+                        ),
+                ),
+            )
+            .into_any_element(),
+        )
+    }
+
+    fn rename_dialog(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let dialog = self.rename.as_ref()?;
+        Some(
+            deferred(
+                div()
+                    .id("rename-overlay")
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(rgba(0x00000080))
+                    .occlude()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| {
+                            this.cancel_rename(&CancelRename, window, cx);
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .child(
+                        div()
+                            .id("rename-dialog")
+                            .w(px(360.))
+                            .p_4()
+                            .flex()
+                            .flex_col()
+                            .gap_3()
+                            .bg(rgb(0x292930))
+                            .border_1()
+                            .border_color(rgb(0x494957))
+                            .rounded_md()
+                            .shadow_lg()
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .child("Rename chat")
+                            .child(
+                                div()
+                                    .h(px(38.))
+                                    .px_2()
+                                    .py(px(7.))
+                                    .bg(rgb(0x202025))
+                                    .border_1()
+                                    .border_color(rgb(0x626270))
+                                    .rounded_sm()
+                                    .child(dialog.input.clone()),
+                            )
+                            .when_some(dialog.error.clone(), |view, error| {
+                                view.child(div().text_xs().text_color(rgb(0xf0aaaa)).child(error))
+                            })
+                            .child(
+                                div()
+                                    .flex()
+                                    .justify_end()
+                                    .gap_2()
+                                    .child(button("cancel-rename", "Cancel").on_click(cx.listener(
+                                        |this, _, window, cx| {
+                                            this.cancel_rename(&CancelRename, window, cx)
+                                        },
+                                    )))
+                                    .child(button("confirm-rename", "Save").on_click(cx.listener(
+                                        |this, _, window, cx| {
+                                            this.confirm_rename(&ConfirmRename, window, cx)
+                                        },
+                                    ))),
+                            ),
+                    ),
+            )
+            .into_any_element(),
+        )
     }
 
     fn confirm_delete_chat(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
@@ -667,69 +1103,118 @@ impl Workspace {
             .min_h_0()
             .flex()
             .flex_col()
-            .gap_3()
-            .child(div().flex().justify_end().child(
-                button("new-chat", "+ New").on_click(
-                    cx.listener(|this, _, window, cx| this.new_chat(&NewChat, window, cx)),
-                ),
-            ))
+            .gap_2()
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_y_1()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div().flex().gap_1().children(
+                            [
+                                ("active-chats", "Chats", false),
+                                ("archived-chats", "Archived", true),
+                            ]
+                            .into_iter()
+                            .map(|(id, label, archived)| {
+                                button(id, label)
+                                    .px_2()
+                                    .bg(rgb(if self.archived == archived {
+                                        0x383842
+                                    } else {
+                                        0x19191d
+                                    }))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.archived = archived;
+                                        this.chat_menu = None;
+                                        cx.notify();
+                                    }))
+                            }),
+                        ),
+                    )
+                    .child(button("new-chat", "+ New").px_2().on_click(
+                        cx.listener(|this, _, window, cx| this.new_chat(&NewChat, window, cx)),
+                    )),
+            )
             .child(
                 div()
                     .id("chat-list")
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .children(self.chats.iter().map(|chat| {
-                        let id = chat.id;
-                        let selected = self.chat.as_ref().is_some_and(|active| active.id == id);
-                        div()
-                            .id(SharedString::from(id.to_string()))
-                            .p_3()
-                            .mb_1()
-                            .rounded_md()
-                            .cursor_pointer()
-                            .bg(rgb(if selected { 0x303039 } else { 0x19191d }))
-                            .hover(|style| style.bg(rgb(0x292930)))
-                            .child(
+                    .when(
+                        !self.chats.iter().any(|chat| chat.archived == self.archived),
+                        |view| {
+                            view.child(
                                 div()
+                                    .px_2()
+                                    .py_2()
+                                    .text_xs()
+                                    .text_color(rgb(0x8b8b96))
+                                    .child(if self.archived {
+                                        "No archived chats"
+                                    } else {
+                                        "No chats"
+                                    }),
+                            )
+                        },
+                    )
+                    .children(
+                        self.chats
+                            .iter()
+                            .filter(|chat| chat.archived == self.archived)
+                            .map(|chat| {
+                                let id = chat.id;
+                                let selected =
+                                    self.chat.as_ref().is_some_and(|active| active.id == id);
+                                div()
+                                    .id(SharedString::from(id.to_string()))
+                                    .h(px(32.))
+                                    .px_2()
                                     .flex()
                                     .items_center()
                                     .gap_2()
+                                    .rounded_sm()
+                                    .cursor_pointer()
+                                    .bg(rgb(if selected { 0x303039 } else { 0x19191d }))
+                                    .hover(|style| style.bg(rgb(0x292930)))
                                     .child(
                                         div()
                                             .flex_1()
                                             .min_w_0()
-                                            .child(
-                                                div()
-                                                    .text_sm()
-                                                    .truncate()
-                                                    .child(chat.title.clone()),
-                                            )
-                                            .child(
-                                                div()
-                                                    .text_xs()
-                                                    .text_color(rgb(0x8b8b96))
-                                                    .child(date_label(chat.updated_at)),
-                                            ),
+                                            .text_sm()
+                                            .truncate()
+                                            .child(chat.title.clone()),
                                     )
+                                    .when(chat.status == Status::Running, |view| {
+                                        view.child(spinner("chat-running"))
+                                    })
                                     .child(
-                                        button("delete", "Delete")
+                                        div()
+                                            .id("chat-actions")
+                                            .size(px(22.))
                                             .flex_shrink_0()
-                                            .px_2()
-                                            .text_color(rgb(0xd5a0a0))
-                                            .when(self.waiting, |button| {
-                                                button.opacity(0.4).cursor_default()
-                                            })
-                                            .on_click(cx.listener(move |this, _, window, cx| {
-                                                cx.stop_propagation();
-                                                this.confirm_delete_chat(id, window, cx);
-                                            })),
-                                    ),
-                            )
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.command(Command::Select(id), cx)
-                            }))
-                    })),
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .rounded_sm()
+                                            .hover(|style| style.bg(rgb(0x494957)))
+                                            .child(chat_actions_icon())
+                                            .on_click(cx.listener(
+                                                move |this, event: &ClickEvent, _, cx| {
+                                                    cx.stop_propagation();
+                                                    this.chat_menu = Some((id, event.position()));
+                                                    cx.notify();
+                                                },
+                                            )),
+                                    )
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.command(Command::Select(id), cx)
+                                    }))
+                            }),
+                    ),
             )
     }
 
@@ -906,7 +1391,7 @@ impl Workspace {
                 .text_xs()
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(rgb(0xc5c5d2))
-                .child("ARGON")
+                .child(chat.response_model(content_index).label())
                 .into_any_element(),
             TranscriptRow::Thinking(content_index) => {
                 let expanded = !self.collapsed_thoughts.contains(&content_index);
@@ -1169,14 +1654,19 @@ impl Workspace {
                                     .text_xs()
                                     .line_height(px(16.))
                                     .text_color(rgb(0x91919f))
-                                    .child(if self.running() {
-                                        ""
-                                    } else if self.waiting {
-                                        "Loading…"
-                                    } else {
-                                        "Enter to send · Shift+Enter for a new line"
-                                    }),
+                                    .child(
+                                        if self.chat.as_ref().is_some_and(|chat| chat.archived) {
+                                            "Unarchive this chat to send a message"
+                                        } else if self.running() {
+                                            ""
+                                        } else if self.waiting {
+                                            "Loading…"
+                                        } else {
+                                            "Enter to send · Shift+Enter for a new line"
+                                        },
+                                    ),
                             )
+                            .child(self.model_selector(cx))
                             .child(if self.running() {
                                 button(
                                     "stop",
@@ -1196,6 +1686,10 @@ impl Workspace {
                             } else {
                                 button("send", "Send")
                                     .flex_shrink_0()
+                                    .when(
+                                        self.chat.as_ref().is_some_and(|chat| chat.archived),
+                                        |button| button.opacity(0.4).cursor_default(),
+                                    )
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.send(&SendMessage, window, cx)
                                     }))
@@ -1224,7 +1718,7 @@ impl Drop for Workspace {
                 .sidebar_commands
                 .try_send(SidebarCommand::SaveSettings(self.settings()));
         }
-        self.stop();
+        self.shutdown.cancel();
     }
 }
 
@@ -1238,18 +1732,27 @@ impl Render for Workspace {
         let cost = self.chat.as_ref().map_or(0., Chat::estimated_cost_usd);
         let context_limit = format_tokens(CONTEXT_WINDOW_TOKENS);
         let context = self.chat.as_ref().and_then(|chat| chat.context_tokens);
+        let context_label = self
+            .chat
+            .as_ref()
+            .filter(|chat| chat.context_tokens.is_some() && chat.model != chat.context_model.id())
+            .map_or_else(
+                || "Context".into(),
+                |chat| format!("Context ({})", chat.context_model.name()),
+            );
         let context = context.map_or_else(
-            || format!("Context: — / {context_limit}"),
+            || format!("{context_label}: — / {context_limit}"),
             |tokens| {
                 let percent = tokens as f64 / CONTEXT_WINDOW_TOKENS as f64 * 100.;
                 format!(
-                    "Context: {} / {context_limit} ({percent:.1}%)",
+                    "{context_label}: {} / {context_limit} ({percent:.1}%)",
                     format_tokens(tokens)
                 )
             },
         );
         div()
             .size_full()
+            .relative()
             .bg(rgb(0x202025))
             .text_color(rgb(0xe5e5e8))
             .font_family(".AppleSystemUIFont")
@@ -1261,8 +1764,26 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::send))
             .on_action(cx.listener(Self::new_chat))
             .on_action(cx.listener(Self::toggle_sidebar))
+            .on_action(cx.listener(Self::confirm_rename))
+            .on_action(cx.listener(Self::cancel_rename))
+            .on_action(cx.listener(Self::choose_model))
+            .on_action(cx.listener(|this, _: &NextModel, _, cx| {
+                this.model_menu_index = (this.model_menu_index + 1) % Model::ALL.len();
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &PreviousModel, _, cx| {
+                this.model_menu_index =
+                    (this.model_menu_index + Model::ALL.len() - 1) % Model::ALL.len();
+                cx.notify();
+            }))
             .on_action(cx.listener(|this, _: &Stop, window, cx| {
-                if this.composer_expanded {
+                if this.model_menu.is_some() {
+                    this.close_model_menu(window, cx);
+                } else if this.rename.is_some() {
+                    this.cancel_rename(&CancelRename, window, cx);
+                } else if this.chat_menu.take().is_some() {
+                    cx.notify();
+                } else if this.composer_expanded {
                     this.toggle_composer(window, cx);
                 } else {
                     this.stop();
@@ -1278,6 +1799,34 @@ impl Render for Workspace {
                     .h_full()
                     .flex()
                     .flex_col()
+                    .when(
+                        self.chat.as_ref().is_some_and(|chat| chat.archived),
+                        |view| {
+                            let id = self.chat.as_ref().unwrap().id;
+                            view.child(
+                                div()
+                                    .px_5()
+                                    .py_2()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .text_xs()
+                                    .text_color(rgb(0x91919f))
+                                    .child("Archived")
+                                    .child(button("unarchive-open-chat", "Unarchive").on_click(
+                                        cx.listener(move |this, _, _, cx| {
+                                            this.edit_chat(
+                                                Command::SetArchived {
+                                                    chat_id: id,
+                                                    archived: false,
+                                                },
+                                                cx,
+                                            );
+                                        }),
+                                    )),
+                            )
+                        },
+                    )
                     .when(!self.composer_expanded, |view| {
                         view.child(
                             div()
@@ -1306,6 +1855,21 @@ impl Render for Workspace {
                         view.child(div().px_6().py_2().text_color(rgb(0xf0aaaa)).child(error))
                     })
                     .child(self.composer(window, cx))
+                    .when_some(
+                        self.chat
+                            .as_ref()
+                            .and_then(|chat| chat.cache_notice.clone()),
+                        |view, notice| {
+                            view.child(
+                                div()
+                                    .px_5()
+                                    .pb_2()
+                                    .text_xs()
+                                    .text_color(rgb(0xd5b98c))
+                                    .child(notice),
+                            )
+                        },
+                    )
                     .child(
                         div()
                             .px_5()
@@ -1330,6 +1894,9 @@ impl Render for Workspace {
                             ),
                     ),
             )
+            .when_some(self.render_chat_menu(cx), |view, menu| view.child(menu))
+            .when_some(self.render_model_menu(cx), |view, menu| view.child(menu))
+            .when_some(self.rename_dialog(cx), |view, dialog| view.child(dialog))
     }
 }
 
@@ -1348,6 +1915,13 @@ fn format_tokens(tokens: u64) -> String {
         "{}{suffix}",
         value.trim_end_matches('0').trim_end_matches('.')
     )
+}
+
+fn chat_actions_icon() -> impl IntoElement {
+    div()
+        .flex()
+        .gap(px(3.))
+        .children((0..3).map(|_| div().size(px(2.)).rounded_full().bg(rgb(0xe5e5e8))))
 }
 
 fn composer_icon(expanded: bool) -> impl IntoElement {
@@ -1444,16 +2018,6 @@ fn button(id: impl Into<ElementId>, label: impl IntoElement) -> Stateful<Div> {
         .bg(rgb(0x383842))
         .hover(|style| style.bg(rgb(0x494957)))
         .child(label)
-}
-
-fn date_label(timestamp: u64) -> String {
-    let minutes = space::model::now().saturating_sub(timestamp) / 60_000;
-    match minutes {
-        0 => "Just now".into(),
-        1..60 => format!("{minutes}m ago"),
-        60..1440 => format!("{}h ago", minutes / 60),
-        _ => format!("{}d ago", minutes / 1440),
-    }
 }
 
 fn tool_label(part: &serde_json::Value) -> Option<String> {

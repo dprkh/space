@@ -1,4 +1,7 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    collections::BTreeMap,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -7,6 +10,80 @@ use uuid::Uuid;
 pub const MODEL: &str = "gemini-4-argon";
 pub const CONTEXT_WINDOW_TOKENS: u64 = 1_048_576;
 pub const SYSTEM: &str = "";
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Model {
+    #[default]
+    #[serde(rename = "gemini-4-argon")]
+    Argon,
+    #[serde(rename = "gemini-3.8-flash")]
+    Flash38,
+}
+
+pub struct Prices {
+    pub input: f64,
+    pub cached: f64,
+    pub output: f64,
+    pub storage: f64,
+}
+
+impl Model {
+    pub const ALL: [Self; 2] = [Self::Argon, Self::Flash38];
+
+    pub fn from_id(id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|model| model.id() == id)
+    }
+
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Argon => MODEL,
+            Self::Flash38 => "gemini-3.8-flash",
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Argon => "Gemini 4 Argon",
+            Self::Flash38 => "Gemini 3.8 Flash",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Argon => "GEMINI 4 ARGON",
+            Self::Flash38 => "GEMINI 3.8 FLASH",
+        }
+    }
+
+    pub fn explicit_cache_minimum(self) -> Option<u64> {
+        match self {
+            Self::Argon => None,
+            Self::Flash38 => Some(4_096),
+        }
+    }
+
+    pub fn context_tokens(self, usage: Usage) -> u64 {
+        match self {
+            Self::Argon => usage.context_tokens(),
+            Self::Flash38 => usage.input,
+        }
+    }
+
+    pub fn prices(self, timestamp: u64) -> Prices {
+        // Standard rates: https://ai.google.dev/gemini-api/docs/pricing
+        let (input, cached, output, storage, end) = match self {
+            Self::Argon => (2., 0.10, 10., 0., 1_796_083_200_000),
+            Self::Flash38 => (0.75, 0.075, 3.75, 0.50, 1_798_761_600_000),
+        };
+        let multiplier = if timestamp < end { 1. } else { 2. };
+        Prices {
+            input: input * multiplier,
+            cached: cached * multiplier,
+            output: output * multiplier,
+            storage: storage * multiplier,
+        }
+    }
+}
 
 pub fn now() -> u64 {
     SystemTime::now()
@@ -94,19 +171,13 @@ impl Usage {
         )
     }
 
-    pub fn estimated_cost_usd(self, timestamp: u64) -> f64 {
-        // Standard Argon pricing: https://ai.google.dev/gemini-api/docs/pricing
-        // The introductory rates end on December 1, 2026 (UTC).
-        let multiplier = if timestamp < 1_796_083_200_000 {
-            1.
-        } else {
-            2.
-        };
+    pub fn estimated_cost_usd(self, model: Model, timestamp: u64) -> f64 {
+        let prices = model.prices(timestamp);
         let cached = self.cached.min(self.input);
-        let cost = (self.input - cached) as f64 * 2.
-            + cached as f64 * 0.10
-            + (self.output as f64 + self.thinking as f64) * 10.;
-        cost * multiplier / 1_000_000.
+        ((self.input - cached) as f64 * prices.input
+            + cached as f64 * prices.cached
+            + (self.output as f64 + self.thinking as f64) * prices.output)
+            / 1_000_000.
     }
 }
 
@@ -136,8 +207,16 @@ pub struct Chat {
     pub version: u32,
     pub id: Uuid,
     pub title: String,
+    #[serde(default)]
+    pub title_is_custom: bool,
+    #[serde(default)]
+    pub archived: bool,
     pub updated_at: u64,
     pub model: String,
+    #[serde(default)]
+    pub response_models: BTreeMap<usize, Model>,
+    #[serde(default)]
+    pub partial_model: Model,
     pub system: String,
     pub tools: Value,
     pub contents: Vec<Content>,
@@ -148,7 +227,15 @@ pub struct Chat {
     #[serde(default)]
     pub context_tokens: Option<u64>,
     #[serde(default)]
+    pub context_model: Model,
+    #[serde(default)]
     pub cost_usd: Option<f64>,
+    #[serde(default)]
+    pub cache_storage_cost_usd: f64,
+    #[serde(default)]
+    pub cache: crate::cache::CacheState,
+    #[serde(default)]
+    pub cache_notice: Option<String>,
     #[serde(default)]
     pub usage_complete: bool,
     pub status: Status,
@@ -165,15 +252,23 @@ impl Default for Chat {
             version: 1,
             id: Uuid::new_v4(),
             title: "New chat".into(),
+            title_is_custom: false,
+            archived: false,
             updated_at: now(),
             model: MODEL.into(),
+            response_models: BTreeMap::new(),
+            partial_model: Model::default(),
             system: SYSTEM.into(),
             tools: crate::project::declarations(),
             contents: Vec::new(),
             file_changes: Vec::new(),
             usage: Usage::default(),
             context_tokens: None,
+            context_model: Model::default(),
             cost_usd: Some(0.),
+            cache_storage_cost_usd: 0.,
+            cache: crate::cache::CacheState::default(),
+            cache_notice: None,
             usage_complete: true,
             status: Status::Idle,
             notice: None,
@@ -184,19 +279,41 @@ impl Default for Chat {
 }
 
 impl Chat {
-    pub fn estimated_cost_usd(&self) -> f64 {
+    pub fn token_cost_usd(&self) -> f64 {
         self.cost_usd
-            .unwrap_or_else(|| self.usage.estimated_cost_usd(self.updated_at))
+            .unwrap_or_else(|| self.usage.estimated_cost_usd(Model::Argon, self.updated_at))
     }
 
-    pub fn record_usage(&mut self, usage: Usage, timestamp: u64) {
-        self.context_tokens = Some(usage.context_tokens());
-        self.cost_usd = Some(self.estimated_cost_usd() + usage.estimated_cost_usd(timestamp));
+    pub fn estimated_cost_usd(&self) -> f64 {
+        self.token_cost_usd() + self.cache_storage_cost_usd
+    }
+
+    pub fn response_model(&self, content_index: usize) -> Model {
+        if content_index == self.contents.len() {
+            self.partial_model
+        } else {
+            self.response_models
+                .get(&content_index)
+                .copied()
+                .unwrap_or_default()
+        }
+    }
+
+    pub fn record_usage(&mut self, model: Model, usage: Usage, timestamp: u64) {
+        self.context_tokens = Some(model.context_tokens(usage));
+        self.context_model = model;
+        self.cost_usd = Some(self.token_cost_usd() + usage.estimated_cost_usd(model, timestamp));
         self.usage += usage;
     }
 
+    pub fn record_activity(&mut self) {
+        self.cost_usd = Some(self.token_cost_usd());
+        self.updated_at = now();
+    }
+
     pub fn push_user(&mut self, text: &str) {
-        if self.contents.is_empty() {
+        self.record_activity();
+        if self.contents.is_empty() && !self.title_is_custom {
             self.title = text
                 .lines()
                 .next()
@@ -208,6 +325,7 @@ impl Chat {
         self.contents.push(Content::text(Role::User, text));
         self.status = Status::Running;
         self.notice = None;
+        self.cache_notice = None;
         self.partial.clear();
         self.partial_thoughts.clear();
     }
