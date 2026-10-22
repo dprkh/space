@@ -321,6 +321,23 @@ impl Input {
 
     fn paint(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         self.bounds = bounds;
+        if !self.layout_lines(bounds, window) {
+            return;
+        }
+        self.reveal_caret(bounds);
+        self.position_lines();
+        window.handle_input(
+            &self.focus,
+            ElementInputHandler::new(bounds, cx.entity()),
+            cx,
+        );
+        window.with_content_mask(Some(ContentMask { bounds }), |window| {
+            self.paint_visible_lines(bounds, window, cx);
+            self.paint_caret(window);
+        });
+    }
+
+    fn styled_text(&self, window: &Window) -> (SharedString, Vec<TextRun>) {
         let placeholder = self.text.is_empty();
         let text: SharedString = if placeholder {
             if self.single_line {
@@ -361,6 +378,11 @@ impl Input {
                 strikethrough: None,
             })
             .collect();
+        (text, runs)
+    }
+
+    fn layout_lines(&mut self, bounds: Bounds<Pixels>, window: &mut Window) -> bool {
+        let (text, runs) = self.styled_text(window);
         let Ok(shaped) = window.text_system().shape_text(
             text,
             px(14.),
@@ -368,22 +390,27 @@ impl Input {
             (!self.single_line).then_some(bounds.size.width),
             None,
         ) else {
-            return;
+            return false;
         };
         self.lines.clear();
         let mut origin = bounds.origin;
         let mut start = 0;
         for line in shaped {
             let height = px(LINE_HEIGHT * (line.wrap_boundaries.len() + 1) as f32);
+            let length = line.len();
             self.lines.push(InputLine {
                 start,
                 line,
                 origin,
             });
-            start += self.lines.last().unwrap().line.len() + 1;
+            start += length + 1;
             origin.y += height;
         }
         self.content_height = origin.y - bounds.top();
+        true
+    }
+
+    fn reveal_caret(&mut self, bounds: Bounds<Pixels>) {
         if std::mem::take(&mut self.reveal_cursor)
             && let Some(caret) = self.caret_bounds(self.cursor())
         {
@@ -398,49 +425,56 @@ impl Input {
                 }
             }
         }
+    }
+
+    fn position_lines(&mut self) {
         self.scroll = self.scroll.clamp(px(0.), self.max_scroll());
         for entry in &mut self.lines {
             entry.origin.y -= self.scroll;
             entry.origin.x -= self.scroll_x;
         }
-        window.handle_input(
-            &self.focus,
-            ElementInputHandler::new(bounds, cx.entity()),
-            cx,
-        );
-        window.with_content_mask(Some(ContentMask { bounds }), |window| {
-            for entry in &self.lines {
-                if entry.origin.y >= bounds.bottom() {
-                    break;
-                }
-                let height = px(LINE_HEIGHT * (entry.line.wrap_boundaries.len() + 1) as f32);
-                if entry.origin.y + height <= bounds.top() {
-                    continue;
-                }
-                let _ = entry.line.paint_background(
-                    entry.origin,
-                    px(LINE_HEIGHT),
-                    TextAlign::Left,
-                    Some(bounds),
-                    window,
-                    cx,
-                );
-                let _ = entry.line.paint(
-                    entry.origin,
-                    px(LINE_HEIGHT),
-                    TextAlign::Left,
-                    Some(bounds),
-                    window,
-                    cx,
-                );
+    }
+
+    fn paint_visible_lines(
+        &self,
+        bounds: Bounds<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        for entry in &self.lines {
+            if entry.origin.y >= bounds.bottom() {
+                break;
             }
-            if self.focus.is_focused(window)
-                && self.selection.is_empty()
-                && let Some(caret) = self.caret_bounds(self.cursor())
-            {
-                window.paint_quad(fill(caret, rgb(0xb7b7ed)));
+            let height = px(LINE_HEIGHT * (entry.line.wrap_boundaries.len() + 1) as f32);
+            if entry.origin.y + height <= bounds.top() {
+                continue;
             }
-        });
+            let _ = entry.line.paint_background(
+                entry.origin,
+                px(LINE_HEIGHT),
+                TextAlign::Left,
+                Some(bounds),
+                window,
+                cx,
+            );
+            let _ = entry.line.paint(
+                entry.origin,
+                px(LINE_HEIGHT),
+                TextAlign::Left,
+                Some(bounds),
+                window,
+                cx,
+            );
+        }
+    }
+
+    fn paint_caret(&self, window: &mut Window) {
+        if self.focus.is_focused(window)
+            && self.selection.is_empty()
+            && let Some(caret) = self.caret_bounds(self.cursor())
+        {
+            window.paint_quad(fill(caret, rgb(0xb7b7ed)));
+        }
     }
 }
 

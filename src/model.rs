@@ -332,6 +332,12 @@ impl Chat {
 
     // Recovery completes the protocol without repeating a possibly completed write.
     pub fn interrupt(&mut self, message: &str) {
+        self.complete_pending_calls();
+        self.status = Status::Interrupted;
+        self.notice = Some(message.into());
+    }
+
+    fn complete_pending_calls(&mut self) {
         if let Some(index) = self.contents.iter().rposition(|c| c.role == Role::Model) {
             let calls = self.contents[index].calls();
             if !calls.is_empty() {
@@ -353,8 +359,6 @@ impl Chat {
                 }
             }
         }
-        self.status = Status::Interrupted;
-        self.notice = Some(message.into());
     }
 }
 

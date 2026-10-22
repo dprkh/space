@@ -41,6 +41,12 @@ pub struct Gemini {
     key: String,
 }
 
+pub enum GenerationUpdate {
+    Text(String),
+    Thought(String),
+    Usage(Usage),
+}
+
 pub struct Generation {
     pub content: Content,
     pub usage: Usage,
@@ -168,9 +174,7 @@ impl Gemini {
         &self,
         model: &str,
         request: &Value,
-        mut on_text: impl FnMut(&str),
-        mut on_thought: impl FnMut(&str),
-        mut on_usage: impl FnMut(Usage),
+        mut on_update: impl FnMut(GenerationUpdate),
     ) -> Result<Generation> {
         ensure!(
             !self.key.trim().is_empty(),
@@ -193,69 +197,89 @@ impl Gemini {
             .context("Cannot connect to Google")?;
         let response = self.check_response(response).await?;
         let mut events = response.bytes_stream().eventsource();
-        let mut generation = Generation {
+        let mut generation = Generation::new();
+        while let Some(event) = events.next().await {
+            let event = event.context("Response stream interrupted")?;
+            if event.data == "[DONE]" {
+                break;
+            }
+            self.apply_chunk(&mut generation, &event.data, &mut on_update)?;
+        }
+        generation.complete()
+    }
+
+    fn apply_chunk(
+        &self,
+        generation: &mut Generation,
+        source: &str,
+        on_update: &mut impl FnMut(GenerationUpdate),
+    ) -> Result<()> {
+        ensure!(
+            source.len() <= 8 * 1024 * 1024,
+            "Response event is too large"
+        );
+        let data: Value =
+            serde_json::from_str(source).context("Invalid JSON in response stream")?;
+        if let Some(usage) = data.get("usageMetadata") {
+            generation.usage = serde_json::from_value(usage.clone())?;
+            on_update(GenerationUpdate::Usage(generation.usage));
+        }
+        if let Some(error) = data.get("error") {
+            bail!(
+                "Google stream error: {}",
+                error["message"]
+                    .as_str()
+                    .unwrap_or("Unknown error")
+                    .replace(&self.key, "[redacted]")
+            );
+        }
+        if let Some(reason) = data["promptFeedback"]["blockReason"].as_str() {
+            bail!("Google blocked the request: {reason}");
+        }
+        if let Some(candidate) = data["candidates"].as_array().and_then(|c| c.first()) {
+            if let Some(parts) = candidate["content"]["parts"].as_array() {
+                for part in parts {
+                    if let Some(text) = part["text"].as_str().filter(|text| !text.is_empty()) {
+                        if part["thought"] == true {
+                            on_update(GenerationUpdate::Thought(text.to_owned()));
+                        } else {
+                            on_update(GenerationUpdate::Text(text.to_owned()));
+                        }
+                    }
+                    // Keep even empty text parts: they can contain a signature.
+                    generation.content.parts.push(part.clone());
+                }
+            }
+            if let Some(reason) = candidate["finishReason"].as_str() {
+                generation.finish_reason = reason.into();
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Generation {
+    fn new() -> Self {
+        Self {
             content: Content {
                 role: Role::Model,
                 parts: Vec::new(),
             },
             usage: Usage::default(),
             finish_reason: String::new(),
-        };
-        while let Some(event) = events.next().await {
-            let event = event.context("Response stream interrupted")?;
-            if event.data == "[DONE]" {
-                break;
-            }
-            ensure!(
-                event.data.len() <= 8 * 1024 * 1024,
-                "Response event is too large"
-            );
-            let data: Value =
-                serde_json::from_str(&event.data).context("Invalid JSON in response stream")?;
-            if let Some(usage) = data.get("usageMetadata") {
-                generation.usage = serde_json::from_value(usage.clone())?;
-                on_usage(generation.usage);
-            }
-            if let Some(error) = data.get("error") {
-                bail!(
-                    "Google stream error: {}",
-                    error["message"]
-                        .as_str()
-                        .unwrap_or("Unknown error")
-                        .replace(&self.key, "[redacted]")
-                );
-            }
-            if let Some(reason) = data["promptFeedback"]["blockReason"].as_str() {
-                bail!("Google blocked the request: {reason}");
-            }
-            if let Some(candidate) = data["candidates"].as_array().and_then(|c| c.first()) {
-                if let Some(parts) = candidate["content"]["parts"].as_array() {
-                    for part in parts {
-                        if let Some(text) = part["text"].as_str().filter(|text| !text.is_empty()) {
-                            if part["thought"] == true {
-                                on_thought(text);
-                            } else {
-                                on_text(text);
-                            }
-                        }
-                        // Keep even empty text parts: they can contain a signature.
-                        generation.content.parts.push(part.clone());
-                    }
-                }
-                if let Some(reason) = candidate["finishReason"].as_str() {
-                    generation.finish_reason = reason.into();
-                }
-            }
         }
+    }
+
+    fn complete(self) -> Result<Self> {
         ensure!(
-            !generation.finish_reason.is_empty(),
+            !self.finish_reason.is_empty(),
             "Response stream ended before completion"
         );
         ensure!(
-            !generation.content.parts.is_empty(),
+            !self.content.parts.is_empty(),
             "Google returned an empty response ({})",
-            generation.finish_reason
+            self.finish_reason
         );
-        Ok(generation)
+        Ok(self)
     }
 }

@@ -129,4 +129,12 @@ Chats use versioned JSON files with atomic saves. A chat has a 64 MiB storage li
 
 ## Code layout
 
-The library contains the model protocol, streaming client, project file tools, chat storage, and agent worker. The executable contains the GPUI window and text input. One worker thread owns all disk and network operations; the UI communicates with it through channels.
+The library contains the model protocol, streaming client, project file tools, chat storage, and agent worker. The executable contains the GPUI window and text input. One worker thread owns all disk and network operations. The UI communicates with it through channels.
+
+The UI shell coordinates private modules for events, the transcript, the sidebar, the composer, menus, and usage display. Transcript state owns Markdown caches, diffs, rows, and scroll state. Sidebar state owns chat summaries, run IDs, and the file tree. Layout state owns panel sizes and pending layout changes.
+
+The agent has separate modules for chat control, run execution, and sidebar work. The scheduler owns active run futures. Chat command handlers own validation, saves, and rollback for their command. A run prepares a request, receives a response, records usage, saves the response, and executes tools.
+
+The Gemini client reports text, thoughts, and usage through one `GenerationUpdate` callback. The cache module owns saved cache data and cache decisions. Cache preparation is private to the run implementation, which owns network calls, saves, rollback, and cleanup.
+
+Project file creation, project file replacement, and application storage writes use separate private functions. Each function keeps its own permission and overwrite rules. Markdown document handling is separate from rich-text display. Text input uses separate functions for styling, line layout, scrolling, and painting.

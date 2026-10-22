@@ -1,3 +1,5 @@
+mod write;
+
 use std::{cell::RefCell, path::Path};
 
 use anyhow::{Context, Result, ensure};
@@ -9,7 +11,7 @@ use uuid::Uuid;
 
 use crate::{
     model::{Chat, Model, Status},
-    project::{Project, atomic_write, open_regular, read_text},
+    project::{Project, open_regular, read_text},
 };
 
 const MAX_CHAT_SIZE: u64 = 64 * 1024 * 1024;
@@ -110,13 +112,7 @@ impl Store {
             bytes.len() as u64 <= MAX_CHAT_SIZE,
             "Chat exceeds the 64 MiB storage limit. Start a new chat"
         );
-        atomic_write(
-            &self.chats,
-            Path::new(&format!("{}.json", chat.id)),
-            &bytes,
-            None,
-            false,
-        )
+        write::replace(&self.chats, Path::new(&format!("{}.json", chat.id)), &bytes)
     }
 
     pub fn delete(&self, id: Uuid) -> Result<()> {
@@ -139,7 +135,7 @@ impl Store {
     }
 
     pub fn preferences(&self) -> Result<Preferences> {
-        let mut file = match open_regular(&self.dir, Path::new("preferences.json"), false) {
+        let mut file = match open_regular(&self.dir, Path::new("preferences.json")) {
             Ok(file) => file,
             Err(error)
                 if error
@@ -154,12 +150,10 @@ impl Store {
     }
 
     pub fn save_preferences(&self, preferences: &Preferences) -> Result<()> {
-        atomic_write(
+        write::replace(
             &self.dir,
             Path::new("preferences.json"),
             &serde_json::to_vec(preferences)?,
-            None,
-            false,
         )
     }
 
@@ -173,7 +167,7 @@ impl Store {
     }
 
     pub fn ui_settings(&self) -> Result<UiSettings> {
-        let mut file = match open_regular(&self.dir, Path::new("ui.json"), false) {
+        let mut file = match open_regular(&self.dir, Path::new("ui.json")) {
             Ok(file) => file,
             Err(error)
                 if error
@@ -190,28 +184,20 @@ impl Store {
 
     pub fn save_ui_settings(&self, settings: UiSettings) -> Result<()> {
         let settings = settings.validated()?;
-        atomic_write(
+        write::replace(
             &self.dir,
             Path::new("ui.json"),
             &serde_json::to_vec(&settings)?,
-            None,
-            false,
         )
     }
 
     pub fn select(&self, id: Uuid) -> Result<()> {
-        atomic_write(
-            &self.dir,
-            Path::new("active"),
-            id.to_string().as_bytes(),
-            None,
-            false,
-        )
+        write::replace(&self.dir, Path::new("active"), id.to_string().as_bytes())
     }
 
     pub fn load(&self, id: Uuid) -> Result<Chat> {
         let text = read_text(
-            &mut open_regular(&self.chats, Path::new(&format!("{id}.json")), false)?,
+            &mut open_regular(&self.chats, Path::new(&format!("{id}.json")))?,
             MAX_CHAT_SIZE,
         )?;
         let chat: Chat = serde_json::from_str(&text).context("Cannot read saved chat")?;
@@ -267,7 +253,7 @@ impl Store {
     }
 
     pub fn restore(&self) -> Result<Chat> {
-        match open_regular(&self.dir, Path::new("active"), false) {
+        match open_regular(&self.dir, Path::new("active")) {
             Ok(mut file) => {
                 let id = Uuid::parse_str(read_text(&mut file, 128)?.trim())
                     .context("Invalid active chat ID")?;

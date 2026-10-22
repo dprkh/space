@@ -1,15 +1,8 @@
-use std::cell::RefCell;
-
-use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::{
-    gemini::Gemini,
-    model::{Chat, Model, Usage, now},
-    store::Store,
-};
+use crate::model::{Model, Usage};
 
 const HOUR: u64 = 3_600_000;
 
@@ -63,12 +56,38 @@ pub struct CacheState {
     observations: Vec<Observation>,
 }
 
-pub struct Prepared {
-    pub request: Value,
-    pub cache: CachedPrefix,
+pub(crate) struct CachePlan {
+    pub existing: Option<CachedPrefix>,
+    pub candidate: Option<Prefix>,
+    pub obsolete: Vec<String>,
 }
 
 impl CacheState {
+    pub(crate) fn plan(&mut self, model: Model, request: &Value, timestamp: u64) -> CachePlan {
+        let mut obsolete = Vec::new();
+        self.entries.retain(|cache| {
+            let expired = cache.expires_at <= timestamp.saturating_add(30_000);
+            let invalid = cache.model == model && !cache.prefix.matches(request);
+            if invalid && !expired {
+                obsolete.push(cache.name.clone());
+            }
+            !expired && !invalid
+        });
+        let existing = self
+            .entries
+            .iter()
+            .find(|cache| cache.model == model)
+            .cloned();
+        let candidate = self
+            .candidate(model, request, existing.as_ref(), timestamp)
+            .map(|entry| entry.prefix);
+        CachePlan {
+            existing,
+            candidate,
+            obsolete,
+        }
+    }
+
     pub fn observe(
         &mut self,
         model: Model,
@@ -145,101 +164,4 @@ impl CacheState {
         // Compare savings with the complete storage allocation, including replacements.
         (saved > latest.input as f64 * prices.storage).then(|| latest.clone())
     }
-}
-
-pub async fn prepare(
-    gemini: &Gemini,
-    store: &Store,
-    state: &RefCell<Chat>,
-    model: Model,
-    request: &Value,
-) -> Result<Option<Prepared>> {
-    if model.explicit_cache_minimum().is_none() {
-        return Ok(None);
-    }
-    let timestamp = now();
-    let mut obsolete = Vec::new();
-    let (existing, candidate) = {
-        let mut chat = state.borrow_mut();
-        chat.cache.entries.retain(|cache| {
-            let expired = cache.expires_at <= timestamp.saturating_add(30_000);
-            let invalid = cache.model == model && !cache.prefix.matches(request);
-            if invalid && !expired {
-                obsolete.push(cache.name.clone());
-            }
-            !expired && !invalid
-        });
-        let existing = chat
-            .cache
-            .entries
-            .iter()
-            .find(|cache| cache.model == model)
-            .cloned();
-        let candidate = chat
-            .cache
-            .candidate(model, request, existing.as_ref(), timestamp);
-        (existing, candidate)
-    };
-    for name in obsolete {
-        gemini.delete_cache(name).await;
-    }
-    let cache = if let Some(candidate) = candidate {
-        let body = json!({
-            "model": format!("models/{}", model.id()),
-            "systemInstruction": request["systemInstruction"],
-            "tools": request["tools"],
-            "contents": &request["contents"].as_array().unwrap()[..candidate.prefix.contents],
-            "ttl": "3600s"
-        });
-        let created = gemini.create_cache(&body).await?;
-        let cache = CachedPrefix {
-            name: created.name,
-            model,
-            prefix: candidate.prefix,
-            tokens: created.tokens,
-            expires_at: created.expires_at,
-        };
-        let saved = {
-            let mut chat = state.borrow_mut();
-            let old = chat.cache.clone();
-            let old_cost = chat.cache_storage_cost_usd;
-            chat.cache.entries.retain(|entry| entry.model != model);
-            chat.cache.entries.push(cache.clone());
-            chat.cache_storage_cost_usd +=
-                cache.tokens as f64 * model.prices(timestamp).storage / 1_000_000.;
-            match store.save(&mut chat) {
-                Ok(()) => Ok(()),
-                Err(error) => {
-                    chat.cache = old;
-                    chat.cache_storage_cost_usd = old_cost;
-                    Err(error)
-                }
-            }
-        };
-        if let Err(error) = saved {
-            gemini.delete_cache(cache.name.clone()).await;
-            return Err(error);
-        }
-        if let Some(existing) = existing {
-            gemini.delete_cache(existing.name).await;
-        }
-        cache
-    } else if let Some(existing) = existing {
-        existing
-    } else {
-        return Ok(None);
-    };
-    let contents = request["contents"].as_array().unwrap();
-    ensure!(
-        cache.prefix.contents < contents.len(),
-        "The cache has no remaining input"
-    );
-    Ok(Some(Prepared {
-        request: json!({
-            "cachedContent": cache.name,
-            "contents": &contents[cache.prefix.contents..],
-            "generationConfig": request["generationConfig"]
-        }),
-        cache,
-    }))
 }
