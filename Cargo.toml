@@ -1,0 +1,54 @@
+[package]
+name = "space"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+description = "A small, project-scoped Gemini agent with a GPUI interface"
+license = "MIT"
+
+[features]
+default = ["ui"]
+ui = ["dep:gpui", "dep:linkify", "dep:pulldown-cmark", "dep:syntect", "dep:unicode-segmentation"]
+
+[[bin]]
+name = "space"
+path = "src/main.rs"
+required-features = ["ui"]
+
+[profile.dev]
+opt-level = 0
+debug = 0
+lto = "off"
+codegen-units = 256
+incremental = true
+
+[profile.dev.package.gpui]
+opt-level = 2
+
+[profile.dev.package.syntect]
+opt-level = 2
+
+[dependencies]
+anyhow = "1"
+async-channel = "2"
+cap-std = "4.0.3"
+cap-fs-ext = "4.0.3"
+eventsource-stream = "0.2"
+fs2 = "0.4"
+futures-util = "0.3"
+gpui = { version = "=0.2.2", default-features = false, features = ["font-kit", "runtime_shaders"], optional = true }
+libc = "0.2"
+linkify = { version = "0.11", optional = true }
+pulldown-cmark = { version = "0.13", default-features = false, optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+similar = "2.7"
+syntect = { version = "5.3", default-features = false, features = ["default-syntaxes", "default-themes", "regex-fancy"], optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+unicode-segmentation = { version = "1", optional = true }
+uuid = { version = "1", features = ["v4", "serde"] }
+notify = "8.2.0"
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+
