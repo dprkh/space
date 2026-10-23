@@ -1,6 +1,6 @@
 use super::{Event, SidebarCommand};
 use crate::{
-    project::{DirectoryListing, Project},
+    project::{DirectoryListing, FileContent, Project},
     store::Store,
 };
 use anyhow::Result;
@@ -8,18 +8,83 @@ use async_channel::{Receiver, Sender};
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use std::{
     collections::HashMap,
+    future::pending,
     path::{Path, PathBuf},
+    sync::Arc,
 };
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
+
+struct WatchedFile {
+    request_id: Uuid,
+    path: PathBuf,
+    content: Option<Result<Arc<FileContent>, String>>,
+    reading: Option<JoinHandle<Result<Arc<FileContent>, String>>>,
+    changed: bool,
+    cancel: CancellationToken,
+}
+
+impl WatchedFile {
+    fn refresh(&mut self, project: &Arc<Project>) {
+        if self.reading.is_some() {
+            self.changed = true;
+            return;
+        }
+        self.changed = false;
+        let project = project.clone();
+        let path = self.path.clone();
+        let cancel = self.cancel.clone();
+        self.reading = Some(tokio::task::spawn_blocking(move || {
+            project
+                .read_file(&path, &cancel)
+                .map(Arc::new)
+                .map_err(|error| format!("{error:#}"))
+        }));
+    }
+
+    async fn read(&mut self) -> Result<Arc<FileContent>, String> {
+        let Some(reading) = &mut self.reading else {
+            return pending().await;
+        };
+        let content = reading
+            .await
+            .unwrap_or_else(|error| Err(format!("Cannot read file: {error}")));
+        self.reading = None;
+        content
+    }
+
+    fn publish(&mut self, content: Result<Arc<FileContent>, String>, events: &Sender<Event>) {
+        if self.content.as_ref() == Some(&content) {
+            return;
+        }
+        self.content = Some(content.clone());
+        let _ = events.try_send(Event::File {
+            request_id: self.request_id,
+            path: self.path.clone(),
+            content,
+        });
+    }
+}
+
+impl Drop for WatchedFile {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+        if let Some(reading) = &self.reading {
+            reading.abort();
+        }
+    }
+}
 
 pub(super) async fn serve(
-    project: &Project,
+    project: Arc<Project>,
     store: &Store,
     receiver: &Receiver<SidebarCommand>,
     events: &Sender<Event>,
     exit: &CancellationToken,
 ) {
     let mut directories = HashMap::new();
+    let mut file: Option<WatchedFile> = None;
     let (changed, changes) = async_channel::bounded(1);
     let watcher = match watch_project(&project.path, changed, events.clone()) {
         Ok(watcher) => Some(watcher),
@@ -45,10 +110,27 @@ pub(super) async fn serve(
             biased;
             _ = exit.cancelled() => break,
             command = receiver.recv() => match command { Ok(command) => command, Err(_) => break },
+            content = async {
+                match &mut file {
+                    Some(file) => file.read().await,
+                    None => pending().await,
+                }
+            } => {
+                if let Some(file) = &mut file {
+                    file.publish(content, events);
+                    if file.changed {
+                        file.refresh(&project);
+                    }
+                }
+                continue;
+            }
             Ok(()) = changes.recv(), if watcher.is_some() => {
                 let paths: Vec<_> = directories.keys().cloned().collect();
                 for path in paths {
-                    update_directory(project, path, &mut directories, events);
+                    update_directory(&project, path, &mut directories, events);
+                }
+                if let Some(file) = &mut file {
+                    file.refresh(&project);
                 }
                 continue;
             }
@@ -64,9 +146,22 @@ pub(super) async fn serve(
             SidebarCommand::WatchDirectories(paths) => {
                 directories.retain(|path, _| paths.contains(path));
                 for path in paths {
-                    update_directory(project, path, &mut directories, events);
+                    update_directory(&project, path, &mut directories, events);
                 }
             }
+            SidebarCommand::OpenFile { request_id, path } => {
+                let mut opened = WatchedFile {
+                    request_id,
+                    path,
+                    content: None,
+                    reading: None,
+                    changed: false,
+                    cancel: exit.child_token(),
+                };
+                opened.refresh(&project);
+                file = Some(opened);
+            }
+            SidebarCommand::CloseFile => file = None,
         }
     }
 }
@@ -81,7 +176,7 @@ fn watch_project(
         move |result: notify::Result<notify::Event>| match result {
             Ok(event) => {
                 if relevant_change(&event, &root) || event.need_rescan() {
-                    // Coalesce queued events; the worker reloads all visible folders.
+                    // Coalesce queued events; reload visible folders and the open file.
                     let _ = changed.try_send(());
                 }
             }

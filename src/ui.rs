@@ -1,5 +1,6 @@
 mod composer;
 mod events;
+mod file;
 mod menus;
 mod sidebar;
 mod status;
@@ -21,7 +22,7 @@ use uuid::Uuid;
 
 use crate::{
     input::{self, Input},
-    tree::FileTree,
+    tree::{FileTree, OpenFile},
 };
 
 actions!(
@@ -31,6 +32,7 @@ actions!(
         Stop,
         NewChat,
         ToggleSidebar,
+        BackToChat,
         ConfirmRename,
         CancelRename,
         NextModel,
@@ -47,6 +49,7 @@ pub fn run(
     events: Receiver<Event>,
     shutdown: CancellationToken,
 ) {
+    crate::syntax::initialize();
     Application::new().run(move |cx: &mut App| {
         input::bind_keys(cx);
         cx.bind_keys([
@@ -54,6 +57,7 @@ pub fn run(
             KeyBinding::new("enter", ConfirmRename, Some("ChatName")),
             KeyBinding::new("escape", CancelRename, Some("ChatName")),
             KeyBinding::new("escape", Stop, None),
+            KeyBinding::new("escape", BackToChat, Some("FileView")),
             KeyBinding::new("down", NextModel, Some("ModelMenu")),
             KeyBinding::new("up", PreviousModel, Some("ModelMenu")),
             KeyBinding::new("enter", ChooseModel, Some("ModelMenu")),
@@ -100,6 +104,7 @@ struct Workspace {
     shutdown: CancellationToken,
     input: Entity<Input>,
     chat: Option<Chat>,
+    file: Option<Entity<file::FileView>>,
     transcript: transcript::TranscriptState,
     sidebar: sidebar::SidebarState,
     layout: composer::LayoutState,
@@ -122,8 +127,13 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        file::initialize(window);
         let input = cx.new(Input::new);
         let tree = cx.new(|_| FileTree::new(sidebar_commands.clone()));
+        cx.subscribe_in(&tree, window, |this, _, event: &OpenFile, window, cx| {
+            this.open_file(event.0.clone(), window, cx);
+        })
+        .detach();
         let transcript = ListState::new(0, ListAlignment::Bottom, window.viewport_size().height);
         transcript.set_scroll_handler(cx.listener(|this, event: &ListScrollEvent, _, _| {
             this.transcript.follow_output = !event.is_scrolled;
@@ -146,6 +156,15 @@ impl Workspace {
                     "The agent worker stopped. Close the window and start Space again.".into(),
                 );
                 view.waiting = false;
+                if let Some(file) = &view.file {
+                    file.update(cx, |file, cx| {
+                        file.fail(
+                            "The file worker stopped. Close the window and start Space again."
+                                .into(),
+                            cx,
+                        );
+                    });
+                }
                 cx.notify();
             });
         })
@@ -156,6 +175,7 @@ impl Workspace {
             shutdown,
             input,
             chat: None,
+            file: None,
             transcript: transcript::TranscriptState::new(transcript),
             sidebar: sidebar::SidebarState::new(tree),
             layout: composer::LayoutState::default(),
@@ -295,6 +315,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::send))
             .on_action(cx.listener(Self::new_chat))
             .on_action(cx.listener(Self::toggle_sidebar))
+            .on_action(cx.listener(Self::close_file))
             .on_action(cx.listener(Self::confirm_rename))
             .on_action(cx.listener(Self::cancel_rename))
             .on_action(cx.listener(Self::choose_model))
@@ -305,7 +326,11 @@ impl Render for Workspace {
             .when(self.sidebar.visible, |view| {
                 view.child(self.render_sidebar(window, cx))
             })
-            .child(self.conversation_panel(window, cx))
+            .child(if let Some(file) = &self.file {
+                file.clone().into_any_element()
+            } else {
+                self.conversation_panel(window, cx).into_any_element()
+            })
             .when_some(self.render_chat_menu(cx), |view, menu| view.child(menu))
             .when_some(self.render_model_menu(cx), |view, menu| view.child(menu))
             .when_some(self.rename_dialog(cx), |view, dialog| view.child(dialog))

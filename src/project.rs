@@ -16,6 +16,7 @@ use chrono::{Local, SecondsFormat};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use similar::TextDiff;
+use tokio_util::sync::CancellationToken;
 
 use crate::model::FileChange;
 
@@ -37,6 +38,21 @@ pub struct DirectoryEntry {
 pub struct DirectoryListing {
     pub entries: Vec<DirectoryEntry>,
     pub truncated: bool,
+}
+
+#[derive(PartialEq, Eq)]
+pub struct FileContent {
+    pub text: String,
+    pub line_starts: Vec<usize>,
+}
+
+impl FileContent {
+    fn new(text: String) -> Self {
+        let line_starts = std::iter::once(0)
+            .chain(text.match_indices('\n').map(|(offset, _)| offset + 1))
+            .collect();
+        Self { text, line_starts }
+    }
 }
 
 #[derive(Deserialize)]
@@ -129,7 +145,7 @@ impl Project {
 
     fn edit(&self, args: EditArgs) -> Result<(Value, Option<FileChange>)> {
         ensure!(!args.old_text.is_empty(), "old_text must not be empty");
-        let (dir, name) = self.parent(&args.path)?;
+        let (dir, name) = self.parent(Path::new(&args.path))?;
         let mut file = open_regular(&dir, &name)?;
         let text = read_text(&mut file, MAX_FILE_SIZE)?;
         ensure!(
@@ -152,7 +168,7 @@ impl Project {
     }
 
     fn delete(&self, args: PathArgs) -> Result<(Value, Option<FileChange>)> {
-        let (dir, name) = self.parent(&args.path)?;
+        let (dir, name) = self.parent(Path::new(&args.path))?;
         let text = read_text(&mut open_regular(&dir, &name)?, MAX_FILE_SIZE)?;
         dir.remove_file(&name)?;
         dir.try_clone()?.into_std_file().sync_all()?;
@@ -182,8 +198,8 @@ impl Project {
         Ok(parts)
     }
 
-    fn parent(&self, path: &str) -> Result<(Dir, PathBuf)> {
-        let parts = Self::components(Path::new(path))?;
+    fn parent(&self, path: &Path) -> Result<(Dir, PathBuf)> {
+        let parts = Self::components(path)?;
         let (name, parents) = parts.split_last().context("A file path is required")?;
         let mut dir = self.root.try_clone()?;
         for part in parents {
@@ -216,7 +232,7 @@ impl Project {
         let directory = if parts.is_empty() {
             Some(self.root.try_clone()?)
         } else {
-            let (parent, name) = self.parent(path)?;
+            let (parent, name) = self.parent(Path::new(path))?;
             parent.open_dir_nofollow(&name).ok()
         };
         if let Some(dir) = directory {
@@ -238,8 +254,29 @@ impl Project {
             entries.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
             return Ok(json!({"entries": entries, "truncated": truncated}));
         }
-        let (parent, name) = self.parent(path)?;
+        let (parent, name) = self.parent(Path::new(path))?;
         Ok(json!({"text": read_text(&mut open_regular(&parent, &name)?, MAX_FILE_SIZE)?}))
+    }
+
+    pub fn read_file(&self, path: &Path, cancel: &CancellationToken) -> Result<FileContent> {
+        let (parent, name) = self.parent(path)?;
+        let mut file = open_regular(&parent, &name)?;
+        let mut bytes = Vec::new();
+        let mut buffer = [0; 64 * 1024];
+        loop {
+            ensure!(!cancel.is_cancelled(), "File read cancelled");
+            let length = match file.read(&mut buffer) {
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                result => result?,
+            };
+            if length == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&buffer[..length]);
+        }
+        ensure!(!cancel.is_cancelled(), "File read cancelled");
+        let text = String::from_utf8(bytes).context("File is not valid UTF-8")?;
+        Ok(FileContent::new(text))
     }
 
     pub fn list_directory(&self, path: &Path) -> Result<DirectoryListing> {

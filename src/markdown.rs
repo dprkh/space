@@ -66,7 +66,7 @@ impl Node {
                         .iter()
                         .any(|alias| language.eq_ignore_ascii_case(alias))
                 })
-                && let Some(runs) = crate::syntax::python(&text.text)
+                && let Some(runs) = crate::syntax::highlight(&text.text, "py")
             {
                 text.runs = runs
                     .into_iter()

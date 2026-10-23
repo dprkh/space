@@ -32,7 +32,8 @@ impl Default for LayoutState {
 
 impl Workspace {
     pub(super) fn send(&mut self, _: &SendMessage, window: &mut Window, cx: &mut Context<Self>) {
-        if self.running()
+        if self.file.is_some()
+            || self.running()
             || self.waiting
             || self.rename.is_some()
             || self.chat_menu.is_some()

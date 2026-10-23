@@ -43,11 +43,27 @@ impl Workspace {
                 }
             }
             Event::SettingsError(error) => self.layout.error = Some(error),
-            Event::SidebarError(error) => self.sidebar.error = Some(error),
+            Event::SidebarError(error) => {
+                if let Some(file) = &self.file {
+                    file.update(cx, |file, cx| file.set_watch_error(error.clone(), cx));
+                }
+                self.sidebar.error = Some(error);
+            }
             Event::Directory { path, listing } => self
                 .sidebar
                 .tree
                 .update(cx, |tree, cx| tree.directory(path, listing, cx)),
+            Event::File {
+                request_id,
+                path,
+                content,
+            } => {
+                if let Some(file) = &self.file
+                    && file.read(cx).matches(request_id, &path)
+                {
+                    file.update(cx, |file, cx| file.update_content(content, cx));
+                }
+            }
             Event::Error(error) => {
                 self.error = Some(error);
                 self.pending_open = false;

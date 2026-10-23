@@ -4,13 +4,14 @@ mod sidebar;
 
 use crate::{
     model::{Chat, Model},
-    project::{DirectoryListing, Project},
+    project::{DirectoryListing, FileContent, Project},
     store::{ChatSummary, Store, UiSettings},
 };
 use anyhow::Result;
 use async_channel::{Receiver, Sender};
 use std::{
     path::PathBuf,
+    sync::Arc,
     thread::{self, JoinHandle},
 };
 use tokio_util::sync::CancellationToken;
@@ -68,11 +69,18 @@ pub enum Event {
         path: PathBuf,
         listing: Result<DirectoryListing, String>,
     },
+    File {
+        request_id: Uuid,
+        path: PathBuf,
+        content: Result<Arc<FileContent>, String>,
+    },
 }
 
 pub enum SidebarCommand {
     SaveSettings(UiSettings),
     WatchDirectories(Vec<PathBuf>),
+    OpenFile { request_id: Uuid, path: PathBuf },
+    CloseFile,
 }
 
 pub struct Worker {
@@ -93,6 +101,7 @@ impl Worker {
         let thread = thread::Builder::new()
             .name("space-agent".into())
             .spawn(move || {
+                let project = Arc::new(project);
                 tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()?
@@ -105,7 +114,13 @@ impl Worker {
                         };
                         let (result, ()) = tokio::join!(
                             chats,
-                            sidebar::serve(&project, &store, &sidebar_receiver, &events, &exit)
+                            sidebar::serve(
+                                project.clone(),
+                                &store,
+                                &sidebar_receiver,
+                                &events,
+                                &exit
+                            )
                         );
                         // Save pending layout changes before the worker exits.
                         while let Ok(command) = sidebar_receiver.try_recv() {

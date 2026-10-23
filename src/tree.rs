@@ -13,13 +13,18 @@ enum DirectoryState {
     Error(String),
 }
 
+pub struct OpenFile(pub PathBuf);
+
 pub struct FileTree {
     commands: Sender<SidebarCommand>,
     directories: HashMap<PathBuf, DirectoryState>,
     expanded: HashSet<PathBuf>,
     watching: Vec<PathBuf>,
     active: bool,
+    selected: Option<PathBuf>,
 }
+
+impl EventEmitter<OpenFile> for FileTree {}
 
 impl FileTree {
     pub fn new(commands: Sender<SidebarCommand>) -> Self {
@@ -29,7 +34,13 @@ impl FileTree {
             expanded: HashSet::from([PathBuf::from(".")]),
             watching: Vec::new(),
             active: false,
+            selected: None,
         }
+    }
+
+    pub fn select(&mut self, path: Option<PathBuf>, cx: &mut Context<Self>) {
+        self.selected = path;
+        cx.notify();
     }
 
     pub fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {
@@ -114,6 +125,7 @@ impl FileTree {
                     div()
                         .pl(px(depth as f32 * 14.))
                         .py_1()
+                        .mb_1()
                         .text_xs()
                         .text_color(rgb(0x9898a6))
                         .child(label)
@@ -131,6 +143,10 @@ impl FileTree {
                 .to_string_lossy()
                 .into_owned();
             let path = entry.path.clone();
+            let directory = entry.directory;
+            let markdown = path.extension().is_some_and(|extension| {
+                extension.eq_ignore_ascii_case("md") || extension.eq_ignore_ascii_case("markdown")
+            });
             rows.push(
                 div()
                     .id(SharedString::from(format!("file-{}", path.display())))
@@ -140,7 +156,11 @@ impl FileTree {
                     .pl(px(depth as f32 * 14.))
                     .pr_1()
                     .py_1()
+                    .mb_1()
                     .rounded_sm()
+                    .when(self.selected.as_ref() == Some(&path), |row| {
+                        row.bg(rgb(0x303039))
+                    })
                     .hover(|style| style.bg(rgb(0x292930)))
                     .child(
                         div()
@@ -154,10 +174,14 @@ impl FileTree {
                             }),
                     )
                     .child(div().min_w_0().truncate().child(name))
-                    .when(entry.directory, |row| {
+                    .when(directory || markdown, |row| {
                         row.cursor_pointer()
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.toggle(path.clone(), cx);
+                                if directory {
+                                    this.toggle(path.clone(), cx);
+                                } else {
+                                    cx.emit(OpenFile(path.clone()));
+                                }
                             }))
                     })
                     .into_any_element(),
@@ -171,6 +195,7 @@ impl FileTree {
                 div()
                     .pl(px(depth as f32 * 14.))
                     .py_1()
+                    .mb_1()
                     .text_xs()
                     .text_color(rgb(0x9898a6))
                     .child("Only the first 1,000 entries are shown")

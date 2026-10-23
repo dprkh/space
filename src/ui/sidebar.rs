@@ -29,11 +29,12 @@ impl SidebarState {
 struct SidebarResize;
 
 impl Workspace {
-    pub(super) fn new_chat(&mut self, _: &NewChat, _: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn new_chat(&mut self, _: &NewChat, window: &mut Window, cx: &mut Context<Self>) {
         if self.rename.is_some() || self.pending_open {
             return;
         }
         self.sidebar.archived = false;
+        self.close_file(&BackToChat, window, cx);
         self.command(Command::New, cx);
     }
 
@@ -200,6 +201,8 @@ impl Workspace {
                     .id("chat-list")
                     .flex_1()
                     .min_h_0()
+                    .flex()
+                    .flex_col()
                     .overflow_y_scroll()
                     .when(
                         !self
@@ -234,6 +237,8 @@ impl Workspace {
                                 div()
                                     .id(SharedString::from(id.to_string()))
                                     .h(px(32.))
+                                    .flex_shrink_0()
+                                    .mb_1()
                                     .px_2()
                                     .flex()
                                     .items_center()
@@ -280,8 +285,12 @@ impl Workspace {
                                                     )),
                                             ),
                                     )
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.command(Command::Select(id), cx)
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        if this.pending_open {
+                                            return;
+                                        }
+                                        this.close_file(&BackToChat, window, cx);
+                                        this.command(Command::Select(id), cx);
                                     }))
                             }),
                     ),

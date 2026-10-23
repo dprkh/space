@@ -63,7 +63,11 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.rename = None;
-        self.input.read(cx).focus_handle(cx).focus(window);
+        if let Some(file) = &self.file {
+            file.read(cx).focus_handle(cx).focus(window);
+        } else {
+            self.input.read(cx).focus_handle(cx).focus(window);
+        }
         cx.notify();
     }
 

@@ -8,20 +8,47 @@ use syntect::{
     util::LinesWithEndings,
 };
 
-pub fn python(source: &str) -> Option<Vec<(usize, HighlightStyle)>> {
-    static SYNTAXES: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
-    static THEME: LazyLock<Theme> = LazyLock::new(|| {
-        ThemeSet::load_defaults()
-            .themes
-            .remove("base16-ocean.dark")
-            .unwrap_or_default()
-    });
+static SYNTAXES: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
+static THEME: LazyLock<Theme> = LazyLock::new(|| {
+    ThemeSet::load_defaults()
+        .themes
+        .remove("base16-ocean.dark")
+        .unwrap_or_default()
+});
 
-    let syntax = SYNTAXES.find_syntax_by_extension("py")?;
-    let mut highlighter = HighlightLines::new(syntax, &THEME);
-    let mut runs: Vec<(usize, HighlightStyle)> = Vec::new();
-    for line in LinesWithEndings::from(source) {
-        for (style, text) in highlighter.highlight_line(line, &SYNTAXES).ok()? {
+pub fn initialize() {
+    LazyLock::force(&SYNTAXES);
+    LazyLock::force(&THEME);
+
+    // Loading the syntax set leaves its contexts and regular expressions lazy.
+    // Parse the Markdown contexts before the first file can be opened.
+    let _ = highlight(
+        concat!(
+            "# Heading\n\n",
+            "Paragraph with *emphasis*, **strong**, `code`, and \\*escape.\n",
+            "[link](https://example.com) ![image](image.png) <https://example.com>\n\n",
+            "> Quote\n\n- List\n1. Numbered list\n\n",
+            "Heading\n=======\n\n---\n\n",
+            "    Indented code\n\n",
+            "```python\nprint(\"code\")\n```\n\n",
+            "~~~\ncode\n~~~\n\n",
+            "<!-- comment -->\n<div>HTML</div>\n",
+        ),
+        "md",
+    );
+}
+
+pub struct Highlighter(HighlightLines<'static>);
+
+impl Highlighter {
+    pub fn new(extension: &str) -> Option<Self> {
+        let syntax = SYNTAXES.find_syntax_by_extension(extension)?;
+        Some(Self(HighlightLines::new(syntax, &THEME)))
+    }
+
+    pub fn line(&mut self, line: &str) -> Option<Vec<(usize, HighlightStyle)>> {
+        let mut runs: Vec<(usize, HighlightStyle)> = Vec::new();
+        for (style, text) in self.0.highlight_line(line, &SYNTAXES).ok()? {
             if text.is_empty() {
                 continue;
             }
@@ -51,6 +78,23 @@ pub fn python(source: &str) -> Option<Vec<(usize, HighlightStyle)>> {
                 *len += text.len();
             } else {
                 runs.push((text.len(), highlight));
+            }
+        }
+        Some(runs)
+    }
+}
+
+pub fn highlight(source: &str, extension: &str) -> Option<Vec<(usize, HighlightStyle)>> {
+    let mut highlighter = Highlighter::new(extension)?;
+    let mut runs: Vec<(usize, HighlightStyle)> = Vec::new();
+    for line in LinesWithEndings::from(source) {
+        for (length, highlight) in highlighter.line(line)? {
+            if let Some((len, previous)) = runs.last_mut()
+                && *previous == highlight
+            {
+                *len += length;
+            } else {
+                runs.push((length, highlight));
             }
         }
     }
