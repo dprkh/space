@@ -250,27 +250,35 @@ impl Workspace {
                                             .truncate()
                                             .child(chat.title.clone()),
                                     )
-                                    .when(chat.status == Status::Running, |view| {
-                                        view.child(spinner("chat-running"))
-                                    })
                                     .child(
                                         div()
-                                            .id("chat-actions")
-                                            .size(px(22.))
                                             .flex_shrink_0()
                                             .flex()
                                             .items_center()
-                                            .justify_center()
-                                            .rounded_sm()
-                                            .hover(|style| style.bg(rgb(0x494957)))
-                                            .child(chat_actions_icon())
-                                            .on_click(cx.listener(
-                                                move |this, event: &ClickEvent, _, cx| {
-                                                    cx.stop_propagation();
-                                                    this.chat_menu = Some((id, event.position()));
-                                                    cx.notify();
-                                                },
-                                            )),
+                                            .gap(px(3.))
+                                            .when(chat.status == Status::Running, |view| {
+                                                view.child(spinner("chat-running"))
+                                            })
+                                            .child(
+                                                div()
+                                                    .id("chat-actions")
+                                                    .size(px(22.))
+                                                    .flex_shrink_0()
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_center()
+                                                    .rounded_sm()
+                                                    .hover(|style| style.bg(rgb(0x494957)))
+                                                    .child(chat_actions_icon())
+                                                    .on_click(cx.listener(
+                                                        move |this, event: &ClickEvent, _, cx| {
+                                                            cx.stop_propagation();
+                                                            this.chat_menu =
+                                                                Some((id, event.position()));
+                                                            cx.notify();
+                                                        },
+                                                    )),
+                                            ),
                                     )
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.command(Command::Select(id), cx)
