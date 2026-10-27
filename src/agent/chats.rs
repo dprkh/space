@@ -45,6 +45,34 @@ impl LiveChat {
             self.run.as_ref().map(|run| run.id),
         );
     }
+
+    fn start_run(
+        &mut self,
+        store: &Store,
+        events: &Sender<Event>,
+        exit: &CancellationToken,
+    ) -> Result<RunTask> {
+        let mut chat = self.state.borrow_mut();
+        if let Err(error) = store.save(&mut chat) {
+            chat.interrupt(&format!("{error:#}"));
+            drop(chat);
+            self.publish(events, false);
+            return Err(error);
+        }
+        drop(chat);
+        let run_id = Uuid::new_v4();
+        let cancel = exit.child_token();
+        self.run = Some(ActiveRun {
+            id: run_id,
+            cancel: cancel.clone(),
+        });
+        self.publish(events, false);
+        Ok(RunTask {
+            state: self.state.clone(),
+            id: run_id,
+            cancel,
+        })
+    }
 }
 
 struct ChatController<'a> {
@@ -78,6 +106,7 @@ impl<'a> ChatController<'a> {
     fn handle(&mut self, command: Command) -> Result<Option<RunTask>> {
         match command {
             Command::Send { chat_id, text } => return self.send(chat_id, text).map(Some),
+            Command::Retry(id) => return self.retry(id).map(Some),
             Command::Stop(id) => self.stop(id),
             Command::Rename { chat_id, title } => self.rename(chat_id, title)?,
             Command::SetArchived { chat_id, archived } => self.set_archived(chat_id, archived)?,
@@ -109,25 +138,30 @@ impl<'a> ChatController<'a> {
         chat.tools = declarations();
         chat.push_user(&text);
         chat.partial_model = model;
-        if let Err(error) = self.store.save(&mut chat) {
-            chat.interrupt(&format!("{error:#}"));
-            drop(chat);
-            live.publish(self.events, false);
-            return Err(error);
-        }
         drop(chat);
-        let run_id = Uuid::new_v4();
-        let cancel = self.exit.child_token();
-        live.run = Some(ActiveRun {
-            id: run_id,
-            cancel: cancel.clone(),
-        });
-        live.publish(self.events, false);
-        Ok(RunTask {
-            state: live.state.clone(),
-            id: run_id,
-            cancel,
-        })
+        live.start_run(self.store, self.events, self.exit)
+    }
+
+    fn retry(&mut self, chat_id: Uuid) -> Result<RunTask> {
+        let live = live_chat(&mut self.chats, self.store, chat_id)?;
+        ensure!(live.run.is_none(), "This chat is already running");
+        let mut chat = live.state.borrow_mut();
+        ensure!(!chat.archived, "Unarchive this chat before trying again");
+        ensure!(
+            chat.status == Status::Interrupted && !chat.contents.is_empty(),
+            "This chat has no interrupted request"
+        );
+        let model =
+            Model::from_id(&chat.model).context("Select a supported model before trying again")?;
+        chat.record_activity();
+        chat.status = Status::Running;
+        chat.notice = None;
+        chat.cache_notice = None;
+        chat.partial.clear();
+        chat.partial_thoughts.clear();
+        chat.partial_model = model;
+        drop(chat);
+        live.start_run(self.store, self.events, self.exit)
     }
 
     fn stop(&self, id: Uuid) {

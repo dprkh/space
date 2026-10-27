@@ -204,6 +204,26 @@ impl Workspace {
         }
     }
 
+    fn retry(&mut self, cx: &mut Context<Self>) {
+        if self.waiting {
+            return;
+        }
+        let Some(chat) = &self.chat else {
+            return;
+        };
+        if chat.status != Status::Interrupted || chat.archived || chat.contents.is_empty() {
+            return;
+        }
+        if self.commands.try_send(Command::Retry(chat.id)).is_err() {
+            self.error = Some("The agent worker is unavailable".into());
+        } else {
+            self.waiting = true;
+            self.error = None;
+            self.follow_latest();
+        }
+        cx.notify();
+    }
+
     fn command(&mut self, command: Command, cx: &mut Context<Self>) {
         if self.pending_open {
             return;

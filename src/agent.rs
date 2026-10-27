@@ -19,6 +19,7 @@ use uuid::Uuid;
 
 pub enum Command {
     Send { chat_id: Uuid, text: String },
+    Retry(Uuid),
     Stop(Uuid),
     Rename { chat_id: Uuid, title: String },
     SetArchived { chat_id: Uuid, archived: bool },

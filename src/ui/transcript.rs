@@ -516,9 +516,31 @@ impl Workspace {
                 .into_any_element(),
             TranscriptRow::Notice => div()
                 .pt_4()
+                .flex()
+                .items_start()
+                .gap_3()
                 .text_sm()
                 .text_color(rgb(0xd5b98c))
-                .child(chat.notice.clone().unwrap_or_default())
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(chat.notice.clone().unwrap_or_default()),
+                )
+                .when(
+                    chat.status == Status::Interrupted
+                        && !chat.archived
+                        && !chat.contents.is_empty()
+                        && !self.waiting,
+                    |view| {
+                        view.child(
+                            button("retry", "Retry")
+                                .flex_shrink_0()
+                                .text_color(rgb(0xe5e5e8))
+                                .on_click(cx.listener(|this, _, _, cx| this.retry(cx))),
+                        )
+                    },
+                )
                 .into_any_element(),
         };
         div().px_6().min_w_0().child(row).into_any_element()
