@@ -146,8 +146,6 @@ impl RichText {
                     }
                     Event::SoftBreak => " ",
                     Event::HardBreak => "\n",
-                    Event::TaskListMarker(true) => "☑ ",
-                    Event::TaskListMarker(false) => "☐ ",
                     _ => return,
                 };
                 if text.is_empty() {

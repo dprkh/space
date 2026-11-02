@@ -4,6 +4,7 @@ mod sidebar;
 
 use crate::{
     model::{Chat, Model},
+    pdf::Pdf,
     project::{DirectoryListing, FileContent, Project},
     store::{ChatSummary, Store, UiSettings},
 };
@@ -18,18 +19,37 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 pub enum Command {
-    Send { chat_id: Uuid, text: String },
+    Send {
+        chat_id: Uuid,
+        submission_id: Uuid,
+        text: String,
+        pdfs: Vec<Pdf>,
+    },
     Retry(Uuid),
     Stop(Uuid),
-    Rename { chat_id: Uuid, title: String },
-    SetArchived { chat_id: Uuid, archived: bool },
-    SetModel { chat_id: Uuid, model: Model },
+    Rename {
+        chat_id: Uuid,
+        title: String,
+    },
+    SetArchived {
+        chat_id: Uuid,
+        archived: bool,
+    },
+    SetModel {
+        chat_id: Uuid,
+        model: Model,
+    },
     Select(Uuid),
     Delete(Uuid),
     New,
 }
 
 pub enum Event {
+    SendResult {
+        chat_id: Uuid,
+        submission_id: Uuid,
+        result: Result<(), String>,
+    },
     State {
         chat: Box<Chat>,
         opened: bool,

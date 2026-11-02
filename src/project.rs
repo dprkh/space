@@ -1,7 +1,7 @@
 mod write;
 
 use std::{
-    io::Read,
+    io::{BufRead, BufReader, Read},
     path::{Component, Path, PathBuf},
     time::Duration,
 };
@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 use similar::TextDiff;
 use tokio_util::sync::CancellationToken;
 
-use crate::model::FileChange;
+use crate::{model::FileChange, pdf::Pdf};
 
 pub const MAX_FILE_SIZE: u64 = 1024 * 1024;
 const MAX_ENTRIES: usize = 1000;
@@ -26,6 +26,22 @@ const MAX_ENTRIES: usize = 1000;
 pub struct Project {
     pub path: PathBuf,
     pub(crate) root: Dir,
+}
+
+pub struct ToolOutput {
+    pub response: Value,
+    pub pdf: Option<Pdf>,
+    pub change: Option<FileChange>,
+}
+
+impl ToolOutput {
+    fn success(result: Value, change: Option<FileChange>) -> Self {
+        Self {
+            response: json!({"ok": true, "result": result}),
+            pdf: None,
+            change,
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -83,11 +99,12 @@ impl Project {
         Ok(Self { path, root })
     }
 
-    pub fn execute(&self, call: &Value) -> (Value, Option<FileChange>) {
-        match self.execute_inner(call) {
-            Ok((result, change)) => (json!({"ok": true, "result": result}), change),
-            Err(error) => (json!({"ok": false, "error": format!("{error:#}")}), None),
-        }
+    pub fn execute(&self, call: &Value) -> ToolOutput {
+        self.execute_inner(call).unwrap_or_else(|error| ToolOutput {
+            response: json!({"ok": false, "error": format!("{error:#}")}),
+            pdf: None,
+            change: None,
+        })
     }
 
     pub fn system_prompt(&self) -> Result<String> {
@@ -111,20 +128,26 @@ impl Project {
         Ok(prompt)
     }
 
-    fn execute_inner(&self, call: &Value) -> Result<(Value, Option<FileChange>)> {
+    fn execute_inner(&self, call: &Value) -> Result<ToolOutput> {
         let args = call.get("args").cloned().unwrap_or_else(|| json!({}));
         match call["name"].as_str().context("Missing tool name")? {
-            "current_time" => Ok((
+            "current_time" => Ok(ToolOutput::success(
                 json!({ "local_time": Local::now().to_rfc3339_opts(SecondsFormat::Secs, false) }),
                 None,
             )),
             "read" => {
                 let args: PathArgs = serde_json::from_value(args)?;
-                Ok((self.read(&args.path)?, None))
+                self.read(&args.path)
             }
-            "create" => self.create(serde_json::from_value(args)?),
-            "edit" => self.edit(serde_json::from_value(args)?),
-            "delete" => self.delete(serde_json::from_value(args)?),
+            "create" => self
+                .create(serde_json::from_value(args)?)
+                .map(|(result, change)| ToolOutput::success(result, change)),
+            "edit" => self
+                .edit(serde_json::from_value(args)?)
+                .map(|(result, change)| ToolOutput::success(result, change)),
+            "delete" => self
+                .delete(serde_json::from_value(args)?)
+                .map(|(result, change)| ToolOutput::success(result, change)),
             name => bail!("Unknown tool: {name}"),
         }
     }
@@ -227,7 +250,7 @@ impl Project {
         Ok((dir, PathBuf::from(name)))
     }
 
-    fn read(&self, path: &str) -> Result<Value> {
+    fn read(&self, path: &str) -> Result<ToolOutput> {
         let parts = Self::components(Path::new(path))?;
         let directory = if parts.is_empty() {
             Some(self.root.try_clone()?)
@@ -252,10 +275,26 @@ impl Project {
             let truncated = entries.len() > MAX_ENTRIES;
             entries.truncate(MAX_ENTRIES);
             entries.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
-            return Ok(json!({"entries": entries, "truncated": truncated}));
+            return Ok(ToolOutput::success(
+                json!({"entries": entries, "truncated": truncated}),
+                None,
+            ));
         }
         let (parent, name) = self.parent(Path::new(path))?;
-        Ok(json!({"text": read_text(&mut open_regular(&parent, &name)?, MAX_FILE_SIZE)?}))
+        let mut reader = BufReader::new(open_regular(&parent, &name)?);
+        if Pdf::has_header(reader.fill_buf()?) {
+            let pdf = Pdf::read(name.to_string_lossy().into_owned(), reader)?;
+            return Ok(ToolOutput {
+                response: json!({"ok": true, "result": {"path": path, "mime_type": "application/pdf"}}),
+                pdf: Some(pdf),
+                change: None,
+            });
+        }
+        let mut bytes = Vec::new();
+        reader.take(MAX_FILE_SIZE + 1).read_to_end(&mut bytes)?;
+        ensure!(bytes.len() as u64 <= MAX_FILE_SIZE, "File exceeds 1 MiB");
+        let text = String::from_utf8(bytes).context("File is not valid UTF-8")?;
+        Ok(ToolOutput::success(json!({"text": text}), None))
     }
 
     pub fn read_file(&self, path: &Path, cancel: &CancellationToken) -> Result<FileContent> {
@@ -360,7 +399,7 @@ pub(crate) fn read_text(file: &mut File, limit: u64) -> Result<String> {
 pub fn declarations() -> Value {
     json!([{"functionDeclarations": [
         {"name": "current_time", "description": "Get the current date and time in the local timezone."},
-        {"name": "read", "description": "Read a file or list a folder. Use paths relative to the project.",
+        {"name": "read", "description": "Read a UTF-8 text file, read a PDF with its text and images, or list a folder. Use paths relative to the project. PDFs are sent directly to the model.",
          "parameters": {"type":"OBJECT", "properties":{"path":{"type":"STRING"}},"required":["path"]}},
         {"name": "create", "description": "Create a new file and any missing parent folders.",
          "parameters": {"type":"OBJECT", "properties":{"path":{"type":"STRING"},"content":{"type":"STRING"}},"required":["path","content"]}},

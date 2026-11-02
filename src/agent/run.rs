@@ -5,12 +5,12 @@ use super::{Event, publish};
 use crate::{
     gemini::{Gemini, Generation, GenerationUpdate, cache_rejected},
     model::{Chat, Content, Model, Role, Status, ToolChange, Usage, function_response, now},
-    project::Project,
-    store::Store,
+    project::{Project, ToolOutput},
+    store::{Store, check_pdf_capacity},
 };
 use anyhow::{Context, Result, bail};
 use async_channel::Sender;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::{cell::RefCell, rc::Rc};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -231,7 +231,16 @@ impl Run<'_> {
     }
 
     fn execute_tool(&self, content_index: usize, part_index: usize, call: Value) -> Result<()> {
-        let (result, change) = self.project.execute(&call);
+        let ToolOutput {
+            response,
+            pdf,
+            change,
+        } = self.project.execute(&call);
+        let has_pdf = pdf.is_some();
+        let mut response = function_response(&call, response);
+        if let Some(pdf) = pdf {
+            response["functionResponse"]["parts"] = json!([pdf.into_part()]);
+        }
         let mut chat = self.state.borrow_mut();
         if let Some(change) = change {
             chat.file_changes.push(ToolChange {
@@ -244,7 +253,21 @@ impl Run<'_> {
             .last_mut()
             .context("Missing tool response")?
             .parts
-            .push(function_response(&call, result));
+            .push(response);
+        if has_pdf && let Err(error) = check_pdf_capacity(&chat) {
+            let response = chat
+                .contents
+                .last_mut()
+                .and_then(|content| content.parts.last_mut())
+                .context("Missing PDF tool response")?;
+            *response = function_response(
+                &call,
+                json!({
+                    "ok": false,
+                    "error": format!("{error:#}"),
+                }),
+            );
+        }
         self.store.save(&mut chat)?;
         publish(&chat, self.events, false, Some(self.id));
         Ok(())

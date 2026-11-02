@@ -12,6 +12,8 @@ use std::{
 use gpui::{prelude::*, *};
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, Options, Parser, Tag};
 
+use crate::icons::Icon;
+
 const FADE_DURATION: Duration = Duration::from_millis(220);
 
 #[derive(Default)]
@@ -288,10 +290,6 @@ fn render_block(node: &Node, animate: bool) -> AnyElement {
             .flex_col()
             .gap_2()
             .children(children.iter().enumerate().map(|(index, item)| {
-                let marker = start.map_or_else(
-                    || "•".to_owned(),
-                    |start| format!("{}.", start.saturating_add(index as u64)),
-                );
                 div()
                     .id(("item", index))
                     .min_w_0()
@@ -303,13 +301,53 @@ fn render_block(node: &Node, animate: bool) -> AnyElement {
                             .flex_shrink_0()
                             .text_align(TextAlign::Right)
                             .text_color(rgb(0x9797a5))
-                            .child(marker),
+                            .child(match start {
+                                Some(start) => div()
+                                    .child(format!("{}.", start.saturating_add(index as u64)))
+                                    .into_any_element(),
+                                None => div()
+                                    .h(px(23.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_end()
+                                    .child(Icon::Bullet.render(14., 0x9797a5))
+                                    .into_any_element(),
+                            }),
                     )
                     .child(div().flex_1().min_w_0().child(render_block(item, animate)))
             }))
             .into_any_element(),
+        Tag::Item => {
+            let Some(checked) = task_state(node) else {
+                return render_nodes(node, animate).into_any_element();
+            };
+            div()
+                .min_w_0()
+                .flex()
+                .gap_2()
+                .child(
+                    div()
+                        .h(px(23.))
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .child(Icon::Checkbox(checked).render(14., 0x9797a5)),
+                )
+                .child(div().flex_1().min_w_0().child(render_nodes(node, animate)))
+                .into_any_element()
+        }
         Tag::Table(alignments) => render_table(alignments, children, animate).into_any_element(),
         _ => render_nodes(node, animate).into_any_element(),
+    }
+}
+
+fn task_state(node: &Node) -> Option<bool> {
+    match &node.kind {
+        NodeKind::Leaf(Event::TaskListMarker(checked)) => Some(*checked),
+        NodeKind::Element(Tag::Item | Tag::Paragraph, children) => {
+            children.first().and_then(task_state)
+        }
+        _ => None,
     }
 }
 

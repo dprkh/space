@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+use crate::pdf::Pdf;
+
 pub const MODEL: &str = "gemini-4-argon";
 pub const CONTEXT_WINDOW_TOKENS: u64 = 1_048_576;
 pub const SYSTEM: &str = "";
@@ -311,18 +313,31 @@ impl Chat {
         self.updated_at = now();
     }
 
-    pub fn push_user(&mut self, text: &str) {
+    pub fn push_user(&mut self, text: &str, pdfs: Vec<Pdf>) {
         self.record_activity();
         if self.contents.is_empty() && !self.title_is_custom {
-            self.title = text
+            let title = if text.is_empty() {
+                pdfs.first().map_or("New chat", Pdf::name)
+            } else {
+                text
+            };
+            self.title = title
                 .lines()
                 .next()
-                .unwrap_or(text)
+                .unwrap_or(title)
                 .chars()
                 .take(48)
                 .collect();
         }
-        self.contents.push(Content::text(Role::User, text));
+        let mut parts = Vec::new();
+        if !text.is_empty() {
+            parts.push(json!({"text": text}));
+        }
+        parts.extend(pdfs.into_iter().map(Pdf::into_part));
+        self.contents.push(Content {
+            role: Role::User,
+            parts,
+        });
         self.status = Status::Running;
         self.notice = None;
         self.cache_notice = None;

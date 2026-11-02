@@ -4,6 +4,13 @@ use space::{model::Model, store::ChatSummary};
 impl Workspace {
     pub(super) fn event(&mut self, event: Event, cx: &mut Context<Self>) {
         match event {
+            Event::SendResult {
+                chat_id,
+                submission_id,
+                result,
+            } => {
+                self.complete_send(chat_id, submission_id, result, cx);
+            }
             Event::Chats(chats) => self.apply_chats(chats),
             Event::Activity {
                 chat_id,
@@ -146,6 +153,8 @@ impl Workspace {
                 .update_snapshot(previous_chat.as_ref(), &chat, opened);
         if changed {
             self.model_menu = None;
+            self.attachments = Default::default();
+            self.submission = None;
             self.input.update(cx, |input, cx| input.clear(cx));
         }
         if !self.pending_open {

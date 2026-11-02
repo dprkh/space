@@ -7,6 +7,8 @@ use async_channel::Sender;
 use gpui::{prelude::*, *};
 use space::{agent::SidebarCommand, project::DirectoryListing};
 
+use crate::icons::Icon;
+
 enum DirectoryState {
     Loading,
     Loaded(DirectoryListing),
@@ -162,17 +164,17 @@ impl FileTree {
                         row.bg(rgb(0x303039))
                     })
                     .hover(|style| style.bg(rgb(0x292930)))
-                    .child(
-                        div()
-                            .w(px(16.))
-                            .flex_shrink_0()
-                            .text_color(rgb(0x9898a6))
-                            .child(if entry.directory {
-                                if expanded { "▾" } else { "▸" }
+                    .child(div().w(px(16.)).flex_shrink_0().flex().items_center().when(
+                        entry.directory,
+                        |view| {
+                            let icon = if expanded {
+                                Icon::ChevronDown
                             } else {
-                                ""
-                            }),
-                    )
+                                Icon::ChevronRight
+                            };
+                            view.child(icon.render(12., 0x9898a6))
+                        },
+                    ))
                     .child(div().min_w_0().truncate().child(name))
                     .when(directory || markdown, |row| {
                         row.cursor_pointer()

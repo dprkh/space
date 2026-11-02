@@ -7,6 +7,12 @@ struct ComposerResize {
     height: Pixels,
 }
 
+pub(super) struct Submission {
+    id: Uuid,
+    chat_id: Uuid,
+    revision: u64,
+}
+
 pub(super) struct LayoutState {
     pub(super) sidebar_width: Pixels,
     pub(super) composer_height: Pixels,
@@ -35,6 +41,8 @@ impl Workspace {
         if self.file.is_some()
             || self.running()
             || self.waiting
+            || self.submission.is_some()
+            || self.attachments.loading.is_some()
             || self.rename.is_some()
             || self.chat_menu.is_some()
             || self.model_menu.is_some()
@@ -43,7 +51,7 @@ impl Workspace {
             return;
         }
         let text = self.input.read(cx).text.trim().to_owned();
-        if text.is_empty() {
+        if text.is_empty() && self.attachments.pdfs.is_empty() {
             return;
         }
         let Some(chat) = &self.chat else {
@@ -53,22 +61,61 @@ impl Workspace {
             return;
         }
         let chat_id = chat.id;
+        let submission_id = Uuid::new_v4();
         if self
             .commands
-            .try_send(Command::Send { chat_id, text })
+            .try_send(Command::Send {
+                chat_id,
+                submission_id,
+                text,
+                pdfs: self.attachments.pdfs.clone(),
+            })
             .is_err()
         {
             self.error = Some("The agent worker is unavailable".into());
         } else {
             self.waiting = true;
             self.error = None;
-            self.input.update(cx, |input, cx| input.clear(cx));
+            self.submission = Some(Submission {
+                id: submission_id,
+                chat_id,
+                revision: self.input.read(cx).revision(),
+            });
             if self.layout.composer_expanded {
                 self.toggle_composer(window, cx);
             }
             self.follow_latest();
         }
         cx.notify();
+    }
+
+    pub(super) fn complete_send(
+        &mut self,
+        chat_id: Uuid,
+        submission_id: Uuid,
+        result: Result<(), String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(submission) = &self.submission else {
+            return;
+        };
+        if submission.chat_id != chat_id || submission.id != submission_id {
+            return;
+        }
+        let revision = submission.revision;
+        self.submission = None;
+        match result {
+            Ok(()) => {
+                self.attachments = Default::default();
+                if self.input.read(cx).revision() == revision {
+                    self.input.update(cx, |input, cx| input.clear(cx));
+                }
+            }
+            Err(error) => {
+                self.waiting = self.pending_open;
+                self.error = Some(error);
+            }
+        }
     }
 
     pub(super) fn settings(&self) -> UiSettings {
@@ -199,6 +246,9 @@ impl Workspace {
                     .p_2()
                     .flex()
                     .flex_col()
+                    .when(!self.attachments.pdfs.is_empty(), |view| {
+                        view.child(self.pdf_attachments(cx))
+                    })
                     .child(
                         div()
                             .w_full()
@@ -243,6 +293,21 @@ impl Workspace {
                             .justify_between()
                             .items_end()
                             .mt_1()
+                            .child(
+                                button(
+                                    "attach-pdf",
+                                    if self.attachments.loading.is_some() {
+                                        "Loading PDF…"
+                                    } else {
+                                        "Attach PDF"
+                                    },
+                                )
+                                .flex_shrink_0()
+                                .when(!self.can_attach_pdf(), |view| {
+                                    view.opacity(0.4).cursor_default()
+                                })
+                                .on_click(cx.listener(|this, _, _, cx| this.attach_pdf(cx))),
+                            )
                             .child(
                                 div()
                                     .flex_1()

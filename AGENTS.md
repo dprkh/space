@@ -14,6 +14,7 @@
 - Prefer duplicate code when callers can have different requirements. Share a helper only when every caller requires its complete behavior.
 - Do not extend a shared helper for only some callers. Keep caller-specific behavior local.
 - Avoid speculative abstractions and unnecessary configuration options.
+- Use proper icons. Do not use text characters to imitate icons.
 
 ## Verification and review
 

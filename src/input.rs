@@ -61,6 +61,7 @@ struct InputLine {
 pub struct Input {
     focus: FocusHandle,
     pub text: String,
+    revision: u64,
     selection: Range<usize>,
     reversed: bool,
     marked: Option<Range<usize>>,
@@ -79,6 +80,7 @@ impl Input {
         Self {
             focus: cx.focus_handle(),
             text: String::new(),
+            revision: 0,
             selection: 0..0,
             reversed: false,
             marked: None,
@@ -102,6 +104,7 @@ impl Input {
     }
 
     pub fn clear(&mut self, cx: &mut Context<Self>) {
+        self.revision += 1;
         self.text.clear();
         self.selection = 0..0;
         self.marked = None;
@@ -114,6 +117,10 @@ impl Input {
 
     pub fn is_composing(&self) -> bool {
         self.marked.is_some()
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     fn cursor(&self) -> usize {
@@ -525,6 +532,7 @@ impl EntityInputHandler for Input {
             .or(self.marked.clone())
             .unwrap_or(self.selection.clone());
         self.text.replace_range(range.clone(), &text);
+        self.revision += 1;
         self.marked = None;
         self.move_to(range.start + text.len(), false, cx);
     }

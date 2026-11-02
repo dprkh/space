@@ -15,6 +15,15 @@ use crate::{
 };
 
 const MAX_CHAT_SIZE: u64 = 64 * 1024 * 1024;
+pub const MAX_PDF_CHAT_SIZE: u64 = MAX_CHAT_SIZE - 1024 * 1024;
+
+pub(crate) fn check_pdf_capacity(chat: &Chat) -> Result<()> {
+    ensure!(
+        serde_json::to_vec(chat)?.len() as u64 <= MAX_PDF_CHAT_SIZE,
+        "PDF data does not fit in this chat. Start a new chat or select a smaller PDF"
+    );
+    Ok(())
+}
 
 #[derive(Default, Serialize, Deserialize)]
 #[serde(default)]

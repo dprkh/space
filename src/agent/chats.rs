@@ -3,8 +3,9 @@ use super::{Command, Event, publish};
 use crate::{
     gemini::Gemini,
     model::{Chat, Model, Status},
+    pdf::Pdf,
     project::{Project, declarations},
-    store::{Preferences, Store},
+    store::{Preferences, Store, check_pdf_capacity},
 };
 use anyhow::{Context, Result, ensure};
 use async_channel::{Receiver, Sender};
@@ -60,6 +61,10 @@ impl LiveChat {
             return Err(error);
         }
         drop(chat);
+        Ok(self.launch_run(events, exit))
+    }
+
+    fn launch_run(&mut self, events: &Sender<Event>, exit: &CancellationToken) -> RunTask {
         let run_id = Uuid::new_v4();
         let cancel = exit.child_token();
         self.run = Some(ActiveRun {
@@ -67,11 +72,11 @@ impl LiveChat {
             cancel: cancel.clone(),
         });
         self.publish(events, false);
-        Ok(RunTask {
+        RunTask {
             state: self.state.clone(),
             id: run_id,
             cancel,
-        })
+        }
     }
 }
 
@@ -105,7 +110,23 @@ impl<'a> ChatController<'a> {
 
     fn handle(&mut self, command: Command) -> Result<Option<RunTask>> {
         match command {
-            Command::Send { chat_id, text } => return self.send(chat_id, text).map(Some),
+            Command::Send {
+                chat_id,
+                submission_id,
+                text,
+                pdfs,
+            } => {
+                let result = self.send(chat_id, text, pdfs);
+                let _ = self.events.try_send(Event::SendResult {
+                    chat_id,
+                    submission_id,
+                    result: result
+                        .as_ref()
+                        .map(|_| ())
+                        .map_err(|error| format!("{error:#}")),
+                });
+                return Ok(result.ok());
+            }
             Command::Retry(id) => return self.retry(id).map(Some),
             Command::Stop(id) => self.stop(id),
             Command::Rename { chat_id, title } => self.rename(chat_id, title)?,
@@ -123,23 +144,29 @@ impl<'a> ChatController<'a> {
             .retain(|id, live| *id == self.selected || live.run.is_some());
     }
 
-    fn send(&mut self, chat_id: Uuid, text: String) -> Result<RunTask> {
+    fn send(&mut self, chat_id: Uuid, text: String, pdfs: Vec<Pdf>) -> Result<RunTask> {
         let live = live_chat(&mut self.chats, self.store, chat_id)?;
         ensure!(live.run.is_none(), "This chat is already running");
-        let mut chat = live.state.borrow_mut();
+        let mut chat = live.state.borrow().clone();
         ensure!(
             !chat.archived,
             "Unarchive this chat before sending a message"
         );
-        ensure!(!text.trim().is_empty(), "The message is empty");
+        let text = text.trim();
+        ensure!(!text.is_empty() || !pdfs.is_empty(), "The message is empty");
         let model = Model::from_id(&chat.model)
             .context("Select a supported model before sending a message")?;
         chat.system = self.project.system_prompt()?;
         chat.tools = declarations();
-        chat.push_user(&text);
+        let has_pdfs = !pdfs.is_empty();
+        chat.push_user(text, pdfs);
         chat.partial_model = model;
-        drop(chat);
-        live.start_run(self.store, self.events, self.exit)
+        if has_pdfs {
+            check_pdf_capacity(&chat)?;
+        }
+        self.store.save(&mut chat)?;
+        *live.state.borrow_mut() = chat;
+        Ok(live.launch_run(self.events, self.exit))
     }
 
     fn retry(&mut self, chat_id: Uuid) -> Result<RunTask> {

@@ -189,7 +189,9 @@ impl Workspace {
                                     })
                                     .hover(|style| style.bg(rgb(0x494957)))
                                     .child(model.name())
-                                    .when(selected, |view| view.child("✓"))
+                                    .when(selected, |view| {
+                                        view.child(Icon::Check.render(14., 0xe5e5e8))
+                                    })
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         cx.stop_propagation();
                                         this.model_menu_index = index;

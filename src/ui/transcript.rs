@@ -213,7 +213,16 @@ impl TranscriptState {
             if content.role == Role::Model {
                 self.model_rows(content_index, &self.markdown[content_index], &mut rows);
             } else {
-                let text = content.visible_text();
+                let mut text = content.visible_text();
+                for part in &content.parts {
+                    if part["inlineData"]["mimeType"] == "application/pdf" {
+                        if !text.is_empty() {
+                            text.push('\n');
+                        }
+                        text.push_str("PDF: ");
+                        text.push_str(part["inlineData"]["displayName"].as_str().unwrap_or("PDF"));
+                    }
+                }
                 if !text.is_empty() {
                     rows.push(TranscriptRow::User(content_index, CachedText::new(text)));
                 }
@@ -450,9 +459,11 @@ impl Workspace {
                     .get(&(content_index, part_index))
                     .copied();
                 let marker = match change_index {
-                    Some(index) if self.transcript.collapsed_changes.contains(&index) => "▸",
-                    Some(_) => "▾",
-                    None => "↳",
+                    Some(index) if self.transcript.collapsed_changes.contains(&index) => {
+                        Icon::ChevronRight
+                    }
+                    Some(_) => Icon::ChevronDown,
+                    None => Icon::Tool,
                 };
                 div()
                     .id(SharedString::from(format!(
@@ -471,12 +482,7 @@ impl Workspace {
                             .text_size(px(11.))
                             .line_height(px(18.))
                             .text_color(rgb(0x858592))
-                            .child(
-                                div()
-                                    .flex_shrink_0()
-                                    .text_color(rgb(0x626270))
-                                    .child(marker),
-                            )
+                            .child(marker.render(12., 0x626270))
                             .child(div().flex_1().min_w_0().truncate().child(label))
                             .when_some(change_index, |view, change_index| {
                                 let diff = &self.transcript.diffs[change_index];
@@ -484,15 +490,23 @@ impl Workspace {
                                     .when(diff.added > 0, |view| {
                                         view.child(
                                             div()
+                                                .flex()
+                                                .items_center()
+                                                .gap_1()
                                                 .text_color(rgb(0x87ac90))
-                                                .child(format!("+{}", diff.added)),
+                                                .child(Icon::Plus.render(10., 0x87ac90))
+                                                .child(diff.added.to_string()),
                                         )
                                     })
                                     .when(diff.removed > 0, |view| {
                                         view.child(
                                             div()
+                                                .flex()
+                                                .items_center()
+                                                .gap_1()
                                                 .text_color(rgb(0xb58589))
-                                                .child(format!("−{}", diff.removed)),
+                                                .child(Icon::Minus.render(10., 0xb58589))
+                                                .child(diff.removed.to_string()),
                                         )
                                     })
                                     .on_click(cx.listener(move |this, _, _, cx| {

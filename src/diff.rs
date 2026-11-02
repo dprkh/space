@@ -2,7 +2,7 @@ use std::{cell::OnceCell, ops::Range};
 
 use gpui::{prelude::*, *};
 
-use crate::markdown::CachedText;
+use crate::{icons::Icon, markdown::CachedText};
 
 const LINES_PER_BLOCK: usize = 24;
 
@@ -113,11 +113,11 @@ impl FileDiff {
         });
         view.children(lines.iter().map(|line| {
             let (marker, foreground, background) = match line.kind {
-                LineKind::Added => ("+", 0xb0d6b8, 0x20332a),
-                LineKind::Removed => ("−", 0xe2b0b0, 0x39262b),
-                LineKind::Hunk => ("", 0x96abc9, 0x222835),
-                LineKind::Context => ("", 0xb3b3c0, 0x1b1b21),
-                LineKind::Note => ("", 0x858592, 0x1b1b21),
+                LineKind::Added => (Some(Icon::Plus), 0xb0d6b8, 0x20332a),
+                LineKind::Removed => (Some(Icon::Minus), 0xe2b0b0, 0x39262b),
+                LineKind::Hunk => (None, 0x96abc9, 0x222835),
+                LineKind::Context => (None, 0xb3b3c0, 0x1b1b21),
+                LineKind::Note => (None, 0x858592, 0x1b1b21),
             };
             div()
                 .min_w_0()
@@ -127,7 +127,17 @@ impl FileDiff {
                 .text_color(rgb(foreground))
                 .child(line_number(line.old))
                 .child(line_number(line.new))
-                .child(div().w(px(20.)).flex_shrink_0().child(marker))
+                .child(
+                    div()
+                        .w(px(20.))
+                        .h(px(20.))
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .when_some(marker, |view, icon| {
+                            view.child(icon.render(12., foreground))
+                        }),
+                )
                 .child(div().flex_1().min_w_0().pr_2().child(line.text.clone()))
         }))
     }

@@ -1,3 +1,4 @@
+mod attachments;
 mod composer;
 mod events;
 mod file;
@@ -21,6 +22,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{
+    icons::Icon,
     input::{self, Input},
     tree::{FileTree, OpenFile},
 };
@@ -103,6 +105,8 @@ struct Workspace {
     sidebar_commands: Sender<SidebarCommand>,
     shutdown: CancellationToken,
     input: Entity<Input>,
+    attachments: attachments::AttachmentState,
+    submission: Option<composer::Submission>,
     chat: Option<Chat>,
     file: Option<Entity<file::FileView>>,
     transcript: transcript::TranscriptState,
@@ -156,6 +160,7 @@ impl Workspace {
                     "The agent worker stopped. Close the window and start Space again.".into(),
                 );
                 view.waiting = false;
+                view.submission = None;
                 if let Some(file) = &view.file {
                     file.update(cx, |file, cx| {
                         file.fail(
@@ -174,6 +179,8 @@ impl Workspace {
             sidebar_commands,
             shutdown,
             input,
+            attachments: attachments::AttachmentState::default(),
+            submission: None,
             chat: None,
             file: None,
             transcript: transcript::TranscriptState::new(transcript),
@@ -358,27 +365,12 @@ impl Render for Workspace {
 }
 
 fn disclosure_arrow(expanded: bool) -> impl IntoElement {
-    canvas(
-        |_, _, _| (),
-        move |bounds, _, window, _| {
-            let center = bounds.center();
-            let points = if expanded {
-                [(-3.5, -1.75), (0., 1.75), (3.5, -1.75)]
-            } else {
-                [(-1.75, -3.5), (1.75, 0.), (-1.75, 3.5)]
-            };
-            let mut path = PathBuilder::stroke(px(1.5));
-            path.move_to(center + point(px(points[0].0), px(points[0].1)));
-            for (x, y) in &points[1..] {
-                path.line_to(center + point(px(*x), px(*y)));
-            }
-            if let Ok(path) = path.build() {
-                window.paint_path(path, rgb(0x9797a5));
-            }
-        },
-    )
-    .size(px(12.))
-    .flex_shrink_0()
+    if expanded {
+        Icon::ChevronDown
+    } else {
+        Icon::ChevronRight
+    }
+    .render(12., 0x9797a5)
 }
 
 fn spinner(id: impl Into<ElementId>) -> impl IntoElement {

@@ -31,6 +31,7 @@ opt-level = 2
 [dependencies]
 anyhow = "1"
 async-channel = "2"
+base64 = "0.22"
 cap-std = "4.0.3"
 cap-fs-ext = "4.0.3"
 eventsource-stream = "0.2"
