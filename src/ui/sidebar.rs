@@ -192,9 +192,17 @@ impl Workspace {
                             }),
                         ),
                     )
-                    .child(button("new-chat", "+ New").px_2().on_click(
-                        cx.listener(|this, _, window, cx| this.new_chat(&NewChat, window, cx)),
-                    )),
+                    .child(
+                        button("new-chat", new_chat_icon())
+                            .px_2()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child("New")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.new_chat(&NewChat, window, cx)
+                            })),
+                    ),
             )
             .child(
                 div()
@@ -296,6 +304,25 @@ impl Workspace {
                     ),
             )
     }
+}
+
+fn new_chat_icon() -> impl IntoElement {
+    canvas(
+        |_, _, _| (),
+        |bounds, _, window, _| {
+            let center = bounds.center();
+            let mut path = PathBuilder::stroke(px(1.5));
+            path.move_to(center - point(px(4.), px(0.)));
+            path.line_to(center + point(px(4.), px(0.)));
+            path.move_to(center - point(px(0.), px(4.)));
+            path.line_to(center + point(px(0.), px(4.)));
+            if let Ok(path) = path.build() {
+                window.paint_path(path, rgb(0xe5e5e8));
+            }
+        },
+    )
+    .size(px(12.))
+    .flex_shrink_0()
 }
 
 fn chat_actions_icon() -> impl IntoElement {
