@@ -18,8 +18,12 @@ const FADE_DURATION: Duration = Duration::from_millis(220);
 
 #[derive(Default)]
 pub struct Markdown {
-    nodes: Vec<Node>,
-    updated_at: Vec<Option<Instant>>,
+    blocks: Vec<Block>,
+}
+
+struct Block {
+    node: Node,
+    updated_at: Option<Instant>,
 }
 
 struct Node {
@@ -110,42 +114,37 @@ impl Markdown {
             Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
         let nodes = parse_nodes(&mut Parser::new_ext(source, options));
         let now = Instant::now();
-        self.updated_at = nodes
-            .iter()
-            .enumerate()
-            .map(|(index, node)| {
-                if self.nodes.get(index) == Some(node) {
-                    self.updated_at[index]
-                } else {
-                    animate.then_some(now)
-                }
-            })
-            .collect();
-        let mut previous = std::mem::take(&mut self.nodes).into_iter();
-        self.nodes = nodes
+        let mut previous = std::mem::take(&mut self.blocks).into_iter();
+        self.blocks = nodes
             .into_iter()
             .map(|mut node| {
+                let mut updated_at = animate.then_some(now);
                 if let Some(previous) = previous.next() {
-                    node.reuse(previous);
+                    if node == previous.node {
+                        updated_at = previous.updated_at;
+                    }
+                    node.reuse(previous.node);
                 }
-                node
+                Block { node, updated_at }
             })
             .collect();
     }
 
     pub fn block_count(&self) -> usize {
-        self.nodes.len()
+        self.blocks.len()
     }
 
     pub fn render_block(&self, index: usize, id: impl Into<ElementId>) -> Stateful<Div> {
-        let animate =
-            self.updated_at[index].is_some_and(|updated| updated.elapsed() < FADE_DURATION);
+        let block = &self.blocks[index];
+        let animate = block
+            .updated_at
+            .is_some_and(|updated| updated.elapsed() < FADE_DURATION);
         div()
             .id(id)
             .min_w_0()
             .text_size(px(14.))
             .line_height(px(23.))
-            .child(render_block(&self.nodes[index], animate))
+            .child(render_block(&block.node, animate))
     }
 }
 

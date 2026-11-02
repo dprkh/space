@@ -2,6 +2,7 @@ mod attachments;
 mod composer;
 mod events;
 mod file;
+mod layout;
 mod menus;
 mod sidebar;
 mod status;
@@ -111,7 +112,7 @@ struct Workspace {
     file: Option<Entity<file::FileView>>,
     transcript: transcript::TranscriptState,
     sidebar: sidebar::SidebarState,
-    layout: composer::LayoutState,
+    layout: layout::LayoutState,
     chat_menu: Option<(Uuid, Point<Pixels>)>,
     model_menu: Option<Point<Pixels>>,
     model_menu_focus: FocusHandle,
@@ -185,7 +186,7 @@ impl Workspace {
             file: None,
             transcript: transcript::TranscriptState::new(transcript),
             sidebar: sidebar::SidebarState::new(tree),
-            layout: composer::LayoutState::default(),
+            layout: layout::LayoutState::default(),
             chat_menu: None,
             model_menu: None,
             model_menu_focus: cx.focus_handle(),
@@ -253,7 +254,7 @@ impl Drop for Workspace {
         if self.layout.dirty {
             let _ = self
                 .sidebar_commands
-                .try_send(SidebarCommand::SaveSettings(self.settings()));
+                .try_send(SidebarCommand::SaveSettings(self.layout.settings()));
         }
         self.shutdown.cancel();
     }

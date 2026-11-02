@@ -357,207 +357,249 @@ impl Workspace {
             .last()
             .is_some_and(|row| matches!(row, TranscriptRow::Tool(..) | TranscriptRow::Diff(..)));
         let row = match self.transcript.rows[index].clone() {
-            TranscriptRow::User(content_index, text) => div()
-                .id(SharedString::from(format!(
-                    "message-{}-{content_index}",
-                    chat.id
-                )))
-                .pb_6()
-                .child(
-                    div()
-                        .mb_2()
-                        .text_xs()
-                        .text_color(rgb(0x9797a5))
-                        .child("YOU"),
-                )
-                .child(div().text_size(px(14.)).line_height(px(23.)).child(text))
-                .into_any_element(),
-            TranscriptRow::ModelHeader(content_index) => div()
-                .id(SharedString::from(format!(
-                    "model-{}-{content_index}",
-                    chat.id
-                )))
-                .when(previous_is_tool, |view| view.pt_3())
-                .pb_2()
-                .text_xs()
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(rgb(0xc5c5d2))
-                .child(chat.response_model(content_index).label())
-                .into_any_element(),
-            TranscriptRow::Thinking(content_index) => {
-                let expanded = !self.transcript.collapsed_thoughts.contains(&content_index);
-                let active = content_index == chat.contents.len()
-                    && chat.status == Status::Running
-                    && chat.partial.is_empty();
-                div()
-                    .id(SharedString::from(format!(
-                        "thinking-{}-{content_index}",
-                        chat.id
-                    )))
-                    .pb_3()
-                    .child(
-                        div()
-                            .id("toggle")
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .text_xs()
-                            .line_height(px(18.))
-                            .text_color(rgb(0x9797a5))
-                            .cursor_pointer()
-                            .child(disclosure_arrow(expanded))
-                            .child(if active { "Thinking…" } else { "Thinking" })
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.toggle_thoughts(content_index, cx)
-                            })),
-                    )
-                    .into_any_element()
+            TranscriptRow::User(content_index, text) => self.user_row(chat, content_index, text),
+            TranscriptRow::ModelHeader(content_index) => {
+                self.model_header_row(chat, content_index, previous_is_tool)
             }
+            TranscriptRow::Thinking(content_index) => self.thinking_row(chat, content_index, cx),
             TranscriptRow::Thought(content_index, block) => {
-                let markdown = &self.transcript.message_text(content_index).thoughts;
-                div()
-                    .id(SharedString::from(format!(
-                        "thought-{}-{content_index}-{block}",
-                        chat.id
-                    )))
-                    .pl_3()
-                    .pb(if block + 1 == markdown.block_count() {
-                        px(16.)
-                    } else {
-                        px(8.)
-                    })
-                    .border_l_1()
-                    .border_color(rgb(0x3b3b45))
-                    .text_color(rgb(0x9797a5))
-                    .child(
-                        markdown
-                            .render_block(block, ("thought", block))
-                            .text_size(px(13.))
-                            .line_height(px(21.)),
-                    )
-                    .into_any_element()
+                self.thought_row(chat, content_index, block)
             }
             TranscriptRow::Model(content_index, block) => {
-                let markdown = &self.transcript.message_text(content_index).answer;
-                div()
-                    .id(SharedString::from(format!(
-                        "message-{}-{content_index}-{block}",
-                        chat.id
-                    )))
-                    .pb(if block + 1 == markdown.block_count() {
-                        px(24.)
-                    } else {
-                        px(12.)
-                    })
-                    .child(markdown.render_block(block, ("markdown", block)))
-                    .into_any_element()
+                self.model_row(chat, content_index, block)
             }
             TranscriptRow::Tool(content_index, part_index, label) => {
-                let change_index = self
-                    .transcript
-                    .change_indices
-                    .get(&(content_index, part_index))
-                    .copied();
-                let marker = match change_index {
-                    Some(index) if self.transcript.collapsed_changes.contains(&index) => {
-                        Icon::ChevronRight
-                    }
-                    Some(_) => Icon::ChevronDown,
-                    None => Icon::Tool,
-                };
-                div()
-                    .id(SharedString::from(format!(
-                        "tool-{content_index}-{part_index}"
-                    )))
-                    .pt(if previous_is_tool { px(0.) } else { px(8.) })
-                    .pb_1()
-                    .child(
-                        div()
-                            .id("caption")
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .pl_2()
-                            .font_family("Menlo")
-                            .text_size(px(11.))
-                            .line_height(px(18.))
-                            .text_color(rgb(0x858592))
-                            .child(marker.render(12., 0x626270))
-                            .child(div().flex_1().min_w_0().truncate().child(label))
-                            .when_some(change_index, |view, change_index| {
-                                let diff = &self.transcript.diffs[change_index];
-                                view.cursor_pointer()
-                                    .when(diff.added > 0, |view| {
-                                        view.child(
-                                            div()
-                                                .flex()
-                                                .items_center()
-                                                .gap_1()
-                                                .text_color(rgb(0x87ac90))
-                                                .child(Icon::Plus.render(10., 0x87ac90))
-                                                .child(diff.added.to_string()),
-                                        )
-                                    })
-                                    .when(diff.removed > 0, |view| {
-                                        view.child(
-                                            div()
-                                                .flex()
-                                                .items_center()
-                                                .gap_1()
-                                                .text_color(rgb(0xb58589))
-                                                .child(Icon::Minus.render(10., 0xb58589))
-                                                .child(diff.removed.to_string()),
-                                        )
-                                    })
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.toggle_diff(change_index, content_index, cx);
-                                    }))
-                            }),
-                    )
-                    .into_any_element()
+                self.tool_row(content_index, part_index, label, previous_is_tool, cx)
             }
-            TranscriptRow::Diff(_, change_index, block) => div()
-                .id(SharedString::from(format!("diff-{change_index}-{block}")))
-                .min_w_0()
-                .pb(
-                    if block + 1 == self.transcript.diffs[change_index].block_count() {
-                        px(8.)
-                    } else {
-                        px(0.)
-                    },
-                )
-                .child(self.transcript.diffs[change_index].render_block(block))
-                .into_any_element(),
-            TranscriptRow::Notice => div()
-                .pt_4()
-                .flex()
-                .items_start()
-                .gap_3()
-                .text_sm()
-                .text_color(rgb(0xd5b98c))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .child(chat.notice.clone().unwrap_or_default()),
-                )
-                .when(
-                    chat.status == Status::Interrupted
-                        && !chat.archived
-                        && !chat.contents.is_empty()
-                        && !self.waiting,
-                    |view| {
-                        view.child(
-                            button("retry", "Retry")
-                                .flex_shrink_0()
-                                .text_color(rgb(0xe5e5e8))
-                                .on_click(cx.listener(|this, _, _, cx| this.retry(cx))),
-                        )
-                    },
-                )
-                .into_any_element(),
+            TranscriptRow::Diff(_, change_index, block) => self.diff_row(change_index, block),
+            TranscriptRow::Notice => self.notice_row(chat, cx),
         };
         div().px_6().min_w_0().child(row).into_any_element()
+    }
+
+    fn user_row(&self, chat: &Chat, content_index: usize, text: CachedText) -> AnyElement {
+        div()
+            .id(SharedString::from(format!(
+                "message-{}-{content_index}",
+                chat.id
+            )))
+            .pb_6()
+            .child(
+                div()
+                    .mb_2()
+                    .text_xs()
+                    .text_color(rgb(0x9797a5))
+                    .child("YOU"),
+            )
+            .child(div().text_size(px(14.)).line_height(px(23.)).child(text))
+            .into_any_element()
+    }
+
+    fn model_header_row(
+        &self,
+        chat: &Chat,
+        content_index: usize,
+        previous_is_tool: bool,
+    ) -> AnyElement {
+        div()
+            .id(SharedString::from(format!(
+                "model-{}-{content_index}",
+                chat.id
+            )))
+            .when(previous_is_tool, |view| view.pt_3())
+            .pb_2()
+            .text_xs()
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(rgb(0xc5c5d2))
+            .child(chat.response_model(content_index).label())
+            .into_any_element()
+    }
+
+    fn thinking_row(&self, chat: &Chat, content_index: usize, cx: &Context<Self>) -> AnyElement {
+        let expanded = !self.transcript.collapsed_thoughts.contains(&content_index);
+        let active = content_index == chat.contents.len()
+            && chat.status == Status::Running
+            && chat.partial.is_empty();
+        div()
+            .id(SharedString::from(format!(
+                "thinking-{}-{content_index}",
+                chat.id
+            )))
+            .pb_3()
+            .child(
+                div()
+                    .id("toggle")
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_xs()
+                    .line_height(px(18.))
+                    .text_color(rgb(0x9797a5))
+                    .cursor_pointer()
+                    .child(disclosure_arrow(expanded))
+                    .child(if active { "Thinking…" } else { "Thinking" })
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.toggle_thoughts(content_index, cx)),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn thought_row(&self, chat: &Chat, content_index: usize, block: usize) -> AnyElement {
+        let markdown = &self.transcript.message_text(content_index).thoughts;
+        div()
+            .id(SharedString::from(format!(
+                "thought-{}-{content_index}-{block}",
+                chat.id
+            )))
+            .pl_3()
+            .pb(if block + 1 == markdown.block_count() {
+                px(16.)
+            } else {
+                px(8.)
+            })
+            .border_l_1()
+            .border_color(rgb(0x3b3b45))
+            .text_color(rgb(0x9797a5))
+            .child(
+                markdown
+                    .render_block(block, ("thought", block))
+                    .text_size(px(13.))
+                    .line_height(px(21.)),
+            )
+            .into_any_element()
+    }
+
+    fn model_row(&self, chat: &Chat, content_index: usize, block: usize) -> AnyElement {
+        let markdown = &self.transcript.message_text(content_index).answer;
+        div()
+            .id(SharedString::from(format!(
+                "message-{}-{content_index}-{block}",
+                chat.id
+            )))
+            .pb(if block + 1 == markdown.block_count() {
+                px(24.)
+            } else {
+                px(12.)
+            })
+            .child(markdown.render_block(block, ("markdown", block)))
+            .into_any_element()
+    }
+
+    fn tool_row(
+        &self,
+        content_index: usize,
+        part_index: usize,
+        label: SharedString,
+        previous_is_tool: bool,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let change_index = self
+            .transcript
+            .change_indices
+            .get(&(content_index, part_index))
+            .copied();
+        let marker = match change_index {
+            Some(index) if self.transcript.collapsed_changes.contains(&index) => Icon::ChevronRight,
+            Some(_) => Icon::ChevronDown,
+            None => Icon::Tool,
+        };
+        div()
+            .id(SharedString::from(format!(
+                "tool-{content_index}-{part_index}"
+            )))
+            .pt(if previous_is_tool { px(0.) } else { px(8.) })
+            .pb_1()
+            .child(
+                div()
+                    .id("caption")
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .pl_2()
+                    .font_family("Menlo")
+                    .text_size(px(11.))
+                    .line_height(px(18.))
+                    .text_color(rgb(0x858592))
+                    .child(marker.render(12., 0x626270))
+                    .child(div().flex_1().min_w_0().truncate().child(label))
+                    .when_some(change_index, |view, change_index| {
+                        let diff = &self.transcript.diffs[change_index];
+                        view.cursor_pointer()
+                            .when(diff.added > 0, |view| {
+                                view.child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1()
+                                        .text_color(rgb(0x87ac90))
+                                        .child(Icon::Plus.render(10., 0x87ac90))
+                                        .child(diff.added.to_string()),
+                                )
+                            })
+                            .when(diff.removed > 0, |view| {
+                                view.child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1()
+                                        .text_color(rgb(0xb58589))
+                                        .child(Icon::Minus.render(10., 0xb58589))
+                                        .child(diff.removed.to_string()),
+                                )
+                            })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.toggle_diff(change_index, content_index, cx);
+                            }))
+                    }),
+            )
+            .into_any_element()
+    }
+
+    fn diff_row(&self, change_index: usize, block: usize) -> AnyElement {
+        div()
+            .id(SharedString::from(format!("diff-{change_index}-{block}")))
+            .min_w_0()
+            .pb(
+                if block + 1 == self.transcript.diffs[change_index].block_count() {
+                    px(8.)
+                } else {
+                    px(0.)
+                },
+            )
+            .child(self.transcript.diffs[change_index].render_block(block))
+            .into_any_element()
+    }
+
+    fn notice_row(&self, chat: &Chat, cx: &Context<Self>) -> AnyElement {
+        div()
+            .pt_4()
+            .flex()
+            .items_start()
+            .gap_3()
+            .text_sm()
+            .text_color(rgb(0xd5b98c))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(chat.notice.clone().unwrap_or_default()),
+            )
+            .when(
+                chat.status == Status::Interrupted
+                    && !chat.archived
+                    && !chat.contents.is_empty()
+                    && !self.waiting,
+                |view| {
+                    view.child(
+                        button("retry", "Retry")
+                            .flex_shrink_0()
+                            .text_color(rgb(0xe5e5e8))
+                            .on_click(cx.listener(|this, _, _, cx| this.retry(cx))),
+                    )
+                },
+            )
+            .into_any_element()
     }
 
     pub(super) fn render_transcript(&self, cx: &Context<Self>) -> Stateful<Div> {

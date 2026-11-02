@@ -1,5 +1,5 @@
 use super::*;
-use space::{model::Model, store::ChatSummary};
+use space::model::Model;
 
 impl Workspace {
     pub(super) fn event(&mut self, event: Event, cx: &mut Context<Self>) {
@@ -11,7 +11,7 @@ impl Workspace {
             } => {
                 self.complete_send(chat_id, submission_id, result, cx);
             }
-            Event::Chats(chats) => self.apply_chats(chats),
+            Event::Chats(chats) => self.sidebar.replace_chats(chats),
             Event::Activity {
                 chat_id,
                 run_id,
@@ -43,12 +43,7 @@ impl Workspace {
                 run_id,
                 error,
             } => self.apply_run_error(chat_id, run_id, error),
-            Event::UiSettings(settings) => {
-                if !self.layout.dirty {
-                    self.layout.sidebar_width = px(settings.sidebar_width);
-                    self.layout.composer_height = px(settings.composer_height);
-                }
-            }
+            Event::UiSettings(settings) => self.layout.apply_settings(settings),
             Event::SettingsError(error) => self.layout.error = Some(error),
             Event::SidebarError(error) => {
                 if let Some(file) = &self.file {
@@ -79,31 +74,12 @@ impl Workspace {
         }
     }
 
-    fn apply_chats(&mut self, chats: Vec<ChatSummary>) {
-        self.sidebar
-            .runs
-            .retain(|id, _| chats.iter().any(|chat| chat.id == *id));
-        self.sidebar.chats = chats;
-    }
-
     fn apply_activity(&mut self, chat_id: Uuid, run_id: Uuid, timestamp: u64) {
-        if self.sidebar.runs.get(&chat_id) == Some(&run_id) {
-            if let Some(summary) = self
-                .sidebar
-                .chats
-                .iter_mut()
-                .find(|chat| chat.id == chat_id)
-            {
-                summary.updated_at = timestamp;
-            }
-            self.sidebar
-                .chats
-                .sort_by_key(|chat| std::cmp::Reverse(chat.updated_at));
-            if let Some(chat) = &mut self.chat
-                && chat.id == chat_id
-            {
-                chat.updated_at = timestamp;
-            }
+        if self.sidebar.record_activity(chat_id, run_id, timestamp)
+            && let Some(chat) = &mut self.chat
+            && chat.id == chat_id
+        {
+            chat.updated_at = timestamp;
         }
     }
 
@@ -114,25 +90,7 @@ impl Workspace {
         run_id: Option<Uuid>,
         cx: &mut Context<Self>,
     ) {
-        if let Some(run_id) = run_id {
-            self.sidebar.runs.insert(chat.id, run_id);
-        } else {
-            self.sidebar.runs.remove(&chat.id);
-        }
-        let summary = ChatSummary::from(&chat);
-        if let Some(existing) = self
-            .sidebar
-            .chats
-            .iter_mut()
-            .find(|item| item.id == chat.id)
-        {
-            *existing = summary;
-        } else {
-            self.sidebar.chats.push(summary);
-        }
-        self.sidebar
-            .chats
-            .sort_by_key(|item| std::cmp::Reverse(item.updated_at));
+        self.sidebar.update_chat(&chat, run_id);
         if !opened
             && self
                 .chat

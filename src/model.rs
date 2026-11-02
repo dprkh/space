@@ -314,7 +314,7 @@ impl Chat {
     }
 
     pub fn push_user(&mut self, text: &str, pdfs: Vec<Pdf>) {
-        self.record_activity();
+        self.begin_run();
         if self.contents.is_empty() && !self.title_is_custom {
             let title = if text.is_empty() {
                 pdfs.first().map_or("New chat", Pdf::name)
@@ -338,6 +338,10 @@ impl Chat {
             role: Role::User,
             parts,
         });
+    }
+
+    pub(crate) fn begin_run(&mut self) {
+        self.record_activity();
         self.status = Status::Running;
         self.notice = None;
         self.cache_notice = None;
@@ -353,26 +357,26 @@ impl Chat {
     }
 
     fn complete_pending_calls(&mut self) {
-        if let Some(index) = self.contents.iter().rposition(|c| c.role == Role::Model) {
-            let calls = self.contents[index].calls();
-            if !calls.is_empty() {
-                let responses = self.contents.get(index + 1).map_or(0, |c| c.parts.len());
-                let missing: Vec<_> = calls.iter().skip(responses)
-                    .map(|call| function_response(call, json!({
-                        "ok": false,
-                        "error": "Run interrupted. This operation was not replayed. Its outcome may be unknown; read the file before proceeding."
-                    }))).collect();
-                if !missing.is_empty() {
-                    if self.contents.len() == index + 1 {
-                        self.contents.push(Content {
-                            role: Role::User,
-                            parts: missing,
-                        });
-                    } else {
-                        self.contents[index + 1].parts.extend(missing);
-                    }
-                }
-            }
+        let Some(index) = self.contents.iter().rposition(|c| c.role == Role::Model) else {
+            return;
+        };
+        let calls = self.contents[index].calls();
+        let responses = self.contents.get(index + 1).map_or(0, |c| c.parts.len());
+        let missing: Vec<_> = calls.iter().skip(responses)
+            .map(|call| function_response(call, json!({
+                "ok": false,
+                "error": "Run interrupted. This operation was not replayed. Its outcome may be unknown; read the file before proceeding."
+            }))).collect();
+        if missing.is_empty() {
+            return;
+        }
+        if let Some(content) = self.contents.get_mut(index + 1) {
+            content.parts.extend(missing);
+        } else {
+            self.contents.push(Content {
+                role: Role::User,
+                parts: missing,
+            });
         }
     }
 }

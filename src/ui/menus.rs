@@ -45,7 +45,7 @@ impl Workspace {
         if dialog.input.read(cx).is_composing() {
             return;
         }
-        let title = dialog.input.read(cx).text.trim().to_owned();
+        let title = dialog.input.read(cx).text().trim().to_owned();
         if title.is_empty() {
             dialog.error = Some("Enter a chat name".into());
             cx.notify();

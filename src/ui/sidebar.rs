@@ -1,3 +1,4 @@
+use super::layout::SidebarResize;
 use super::*;
 use space::store::ChatSummary;
 use std::collections::HashMap;
@@ -24,9 +25,41 @@ impl SidebarState {
             visible: true,
         }
     }
-}
 
-struct SidebarResize;
+    pub(super) fn replace_chats(&mut self, chats: Vec<ChatSummary>) {
+        self.runs
+            .retain(|id, _| chats.iter().any(|chat| chat.id == *id));
+        self.chats = chats;
+    }
+
+    pub(super) fn record_activity(&mut self, chat_id: Uuid, run_id: Uuid, timestamp: u64) -> bool {
+        if self.runs.get(&chat_id) != Some(&run_id) {
+            return false;
+        }
+        if let Some(summary) = self.chats.iter_mut().find(|chat| chat.id == chat_id) {
+            summary.updated_at = timestamp;
+        }
+        self.chats
+            .sort_by_key(|chat| std::cmp::Reverse(chat.updated_at));
+        true
+    }
+
+    pub(super) fn update_chat(&mut self, chat: &Chat, run_id: Option<Uuid>) {
+        if let Some(run_id) = run_id {
+            self.runs.insert(chat.id, run_id);
+        } else {
+            self.runs.remove(&chat.id);
+        }
+        let summary = ChatSummary::from(chat);
+        if let Some(existing) = self.chats.iter_mut().find(|item| item.id == chat.id) {
+            *existing = summary;
+        } else {
+            self.chats.push(summary);
+        }
+        self.chats
+            .sort_by_key(|item| std::cmp::Reverse(item.updated_at));
+    }
+}
 
 impl Workspace {
     pub(super) fn new_chat(&mut self, _: &NewChat, window: &mut Window, cx: &mut Context<Self>) {
@@ -66,14 +99,7 @@ impl Workspace {
             .flex_col()
             .on_drag_move::<SidebarResize>(cx.listener(
                 move |this, event: &DragMoveEvent<SidebarResize>, _, cx| {
-                    let width =
-                        (event.event.position.x - event.bounds.left()).clamp(px(180.), max_width);
-                    if this.layout.sidebar_width != width {
-                        this.layout.sidebar_width = width;
-                        this.layout.dirty = true;
-                        cx.notify();
-                    }
-                    cx.stop_propagation();
+                    this.resize_sidebar(event, max_width, cx);
                 },
             ))
             .child(
@@ -93,52 +119,7 @@ impl Workspace {
                         view.child(div().text_xs().text_color(rgb(0xf0aaaa)).child(error))
                     }),
             )
-            .child(
-                div()
-                    .id("sidebar-switcher")
-                    .h(px(28.))
-                    .flex_shrink_0()
-                    .border_t_1()
-                    .border_color(rgb(0x303036))
-                    .flex()
-                    .children(
-                        [
-                            ("sidebar-chats", "Chats", false),
-                            ("sidebar-files", "Files", true),
-                        ]
-                        .into_iter()
-                        .map(|(id, label, files)| {
-                            div()
-                                .id(id)
-                                .flex_1()
-                                .h_full()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .text_xs()
-                                .cursor_pointer()
-                                .text_color(rgb(if self.sidebar.files == files {
-                                    0xe5e5e8
-                                } else {
-                                    0x8b8b96
-                                }))
-                                .bg(rgb(if self.sidebar.files == files {
-                                    0x303039
-                                } else {
-                                    0x19191d
-                                }))
-                                .hover(|style| style.bg(rgb(0x292930)))
-                                .child(label)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.sidebar.files = files;
-                                    this.sidebar
-                                        .tree
-                                        .update(cx, |tree, cx| tree.set_active(files, cx));
-                                    cx.notify();
-                                }))
-                        }),
-                    ),
-            )
+            .child(self.sidebar_switcher(cx))
             .child(
                 div()
                     .id("sidebar-resize")
@@ -152,6 +133,53 @@ impl Workspace {
                     .cursor(CursorStyle::ResizeLeftRight)
                     .hover(|style| style.border_color(rgb(0x626270)))
                     .on_drag(SidebarResize, |_, _, _, cx| cx.new(|_| Empty)),
+            )
+    }
+
+    fn sidebar_switcher(&self, cx: &Context<Self>) -> Stateful<Div> {
+        div()
+            .id("sidebar-switcher")
+            .h(px(28.))
+            .flex_shrink_0()
+            .border_t_1()
+            .border_color(rgb(0x303036))
+            .flex()
+            .children(
+                [
+                    ("sidebar-chats", "Chats", false),
+                    ("sidebar-files", "Files", true),
+                ]
+                .into_iter()
+                .map(|(id, label, files)| {
+                    div()
+                        .id(id)
+                        .flex_1()
+                        .h_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_xs()
+                        .cursor_pointer()
+                        .text_color(rgb(if self.sidebar.files == files {
+                            0xe5e5e8
+                        } else {
+                            0x8b8b96
+                        }))
+                        .bg(rgb(if self.sidebar.files == files {
+                            0x303039
+                        } else {
+                            0x19191d
+                        }))
+                        .hover(|style| style.bg(rgb(0x292930)))
+                        .child(label)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.sidebar.files = files;
+                            this.sidebar
+                                .tree
+                                .update(cx, |tree, cx| tree.set_active(files, cx));
+                            cx.notify();
+                        }))
+                }),
             )
     }
 
@@ -238,71 +266,69 @@ impl Workspace {
                             .chats
                             .iter()
                             .filter(|chat| chat.archived == self.sidebar.archived)
-                            .map(|chat| {
-                                let id = chat.id;
-                                let selected =
-                                    self.chat.as_ref().is_some_and(|active| active.id == id);
-                                div()
-                                    .id(SharedString::from(id.to_string()))
-                                    .h(px(32.))
-                                    .flex_shrink_0()
-                                    .mb_1()
-                                    .px_2()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .rounded_sm()
-                                    .cursor_pointer()
-                                    .bg(rgb(if selected { 0x303039 } else { 0x19191d }))
-                                    .hover(|style| style.bg(rgb(0x292930)))
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .text_sm()
-                                            .truncate()
-                                            .child(chat.title.clone()),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex_shrink_0()
-                                            .flex()
-                                            .items_center()
-                                            .gap(px(3.))
-                                            .when(chat.status == Status::Running, |view| {
-                                                view.child(spinner("chat-running"))
-                                            })
-                                            .child(
-                                                div()
-                                                    .id("chat-actions")
-                                                    .size(px(22.))
-                                                    .flex_shrink_0()
-                                                    .flex()
-                                                    .items_center()
-                                                    .justify_center()
-                                                    .rounded_sm()
-                                                    .hover(|style| style.bg(rgb(0x494957)))
-                                                    .child(chat_actions_icon())
-                                                    .on_click(cx.listener(
-                                                        move |this, event: &ClickEvent, _, cx| {
-                                                            cx.stop_propagation();
-                                                            this.chat_menu =
-                                                                Some((id, event.position()));
-                                                            cx.notify();
-                                                        },
-                                                    )),
-                                            ),
-                                    )
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        if this.pending_open {
-                                            return;
-                                        }
-                                        this.close_file(&BackToChat, window, cx);
-                                        this.command(Command::Select(id), cx);
-                                    }))
-                            }),
+                            .map(|chat| self.chat_row(chat, cx)),
                     ),
             )
+    }
+
+    fn chat_row(&self, chat: &ChatSummary, cx: &Context<Self>) -> Stateful<Div> {
+        let id = chat.id;
+        let selected = self.chat.as_ref().is_some_and(|active| active.id == id);
+        div()
+            .id(SharedString::from(id.to_string()))
+            .h(px(32.))
+            .flex_shrink_0()
+            .mb_1()
+            .px_2()
+            .flex()
+            .items_center()
+            .gap_2()
+            .rounded_sm()
+            .cursor_pointer()
+            .bg(rgb(if selected { 0x303039 } else { 0x19191d }))
+            .hover(|style| style.bg(rgb(0x292930)))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_sm()
+                    .truncate()
+                    .child(chat.title.clone()),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .gap(px(3.))
+                    .when(chat.status == Status::Running, |view| {
+                        view.child(spinner("chat-running"))
+                    })
+                    .child(
+                        div()
+                            .id("chat-actions")
+                            .size(px(22.))
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_sm()
+                            .hover(|style| style.bg(rgb(0x494957)))
+                            .child(chat_actions_icon())
+                            .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                                cx.stop_propagation();
+                                this.chat_menu = Some((id, event.position()));
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .on_click(cx.listener(move |this, _, window, cx| {
+                if this.pending_open {
+                    return;
+                }
+                this.close_file(&BackToChat, window, cx);
+                this.command(Command::Select(id), cx);
+            }))
     }
 }
 

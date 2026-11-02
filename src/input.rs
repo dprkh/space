@@ -60,7 +60,7 @@ struct InputLine {
 
 pub struct Input {
     focus: FocusHandle,
-    pub text: String,
+    text: String,
     revision: u64,
     selection: Range<usize>,
     reversed: bool,
@@ -117,6 +117,10 @@ impl Input {
 
     pub fn is_composing(&self) -> bool {
         self.marked.is_some()
+    }
+
+    pub fn text(&self) -> &str {
+        &self.text
     }
 
     pub fn revision(&self) -> u64 {

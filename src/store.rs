@@ -10,8 +10,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
+    fs::{open_regular, read_text},
     model::{Chat, Model, Status},
-    project::{Project, open_regular, read_text},
+    project::Project,
 };
 
 const MAX_CHAT_SIZE: u64 = 64 * 1024 * 1024;
