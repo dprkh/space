@@ -1,3 +1,4 @@
 /target/
 /.space/
 .DS_Store
+.env

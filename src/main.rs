@@ -22,7 +22,7 @@ fn start() -> Result<()> {
     let path = match args.next() {
         Some(arg) if arg == "--help" || arg == "-h" => {
             println!(
-                "Usage: space [PROJECT_FOLDER]\n\nOpen the project in a GPUI window. The current folder is the default.\nSet GEMINI_API_KEY to send messages to Google."
+                "Usage: space [PROJECT_FOLDER]\n\nOpen the project in a GPUI window. The current folder is the default.\nSet GEMINI_API_KEY in the environment or .env to send messages to Google."
             );
             return Ok(());
         }
@@ -34,6 +34,11 @@ fn start() -> Result<()> {
     };
     if args.next().is_some() {
         bail!("Usage: space [PROJECT_FOLDER]");
+    }
+    if let Err(error) = dotenvy::dotenv()
+        && !error.not_found()
+    {
+        bail!("Cannot load .env; check file access and syntax");
     }
     let project = Project::open(&path)?;
     let store = Store::open(&project)?;
