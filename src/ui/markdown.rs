@@ -12,7 +12,7 @@ use std::{
 use gpui::{prelude::*, *};
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, Options, Parser, Tag};
 
-use crate::icons::Icon;
+use super::{icons::Icon, syntax};
 
 const FADE_DURATION: Duration = Duration::from_millis(220);
 
@@ -72,7 +72,7 @@ impl Node {
                         .iter()
                         .any(|alias| language.eq_ignore_ascii_case(alias))
                 })
-                && let Some(runs) = crate::syntax::highlight(&text.text, "py")
+                && let Some(runs) = syntax::highlight(&text.text, "py")
             {
                 text.runs = runs
                     .into_iter()

@@ -1,12 +1,18 @@
 mod attachments;
 mod composer;
+mod diff;
 mod events;
 mod file;
+mod icons;
+mod input;
 mod layout;
+mod markdown;
 mod menus;
 mod sidebar;
 mod status;
+mod syntax;
 mod transcript;
+mod tree;
 
 use std::{
     f32::consts::{FRAC_PI_2, TAU},
@@ -22,9 +28,9 @@ use space::{
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::{
+use self::{
     icons::Icon,
-    input::{self, Input},
+    input::Input,
     tree::{FileTree, OpenFile},
 };
 
@@ -52,7 +58,7 @@ pub fn run(
     events: Receiver<Event>,
     shutdown: CancellationToken,
 ) {
-    crate::syntax::initialize();
+    syntax::initialize();
     Application::new().run(move |cx: &mut App| {
         input::bind_keys(cx);
         cx.bind_keys([

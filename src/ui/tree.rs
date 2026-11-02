@@ -7,7 +7,7 @@ use async_channel::Sender;
 use gpui::{prelude::*, *};
 use space::{agent::SidebarCommand, project::DirectoryListing};
 
-use crate::icons::Icon;
+use super::icons::Icon;
 
 enum DirectoryState {
     Loading,

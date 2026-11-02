@@ -2,7 +2,7 @@ use std::{cell::OnceCell, ops::Range};
 
 use gpui::{prelude::*, *};
 
-use crate::{icons::Icon, markdown::CachedText};
+use super::{icons::Icon, markdown::CachedText};
 
 const LINES_PER_BLOCK: usize = 24;
 

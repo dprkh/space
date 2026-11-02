@@ -39,7 +39,7 @@ pub(super) struct FileView {
 struct SourceDocument {
     content: Arc<FileContent>,
     lines: Vec<SourceLine>,
-    highlighter: Option<crate::syntax::Highlighter>,
+    highlighter: Option<super::syntax::Highlighter>,
     // Offscreen lines extend this width when they become visible.
     width: Pixels,
 }
@@ -55,7 +55,7 @@ impl SourceDocument {
         Self {
             content,
             lines: Vec::new(),
-            highlighter: crate::syntax::Highlighter::new("md"),
+            highlighter: super::syntax::Highlighter::new("md"),
             width: px(0.),
         }
     }

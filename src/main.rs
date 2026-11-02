@@ -1,9 +1,3 @@
-mod diff;
-mod icons;
-mod input;
-mod markdown;
-mod syntax;
-mod tree;
 mod ui;
 
 use std::path::PathBuf;
