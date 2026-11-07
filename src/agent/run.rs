@@ -1,9 +1,11 @@
 mod cache;
+mod metrics;
 
 use self::cache::Prepared;
 use super::{Event, publish};
 use crate::{
     gemini::{Gemini, Generation, GenerationUpdate, cache_rejected},
+    metrics::Context as MetricContext,
     model::{Chat, Content, Model, Role, Status, ToolChange, Usage, function_response, now},
     project::{Project, ToolOutput},
     store::{Store, check_pdf_capacity},
@@ -11,7 +13,7 @@ use crate::{
 use anyhow::{Context, Result, bail};
 use async_channel::Sender;
 use serde_json::{Value, json};
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::RefCell, rc::Rc, time::Instant};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -79,10 +81,17 @@ struct PendingTools {
 impl Run<'_> {
     async fn execute(&mut self) -> Result<()> {
         for round in 0..=32 {
+            let context = MetricContext {
+                chat_id: self.state.borrow().id,
+                run_id: Some(self.id),
+                round: Some(round),
+            };
             let request = Gemini::request(&self.state.borrow());
-            let prepared = self.prepare_request(&request).await?;
+            let prepared = self.prepare_request(&request, context).await?;
             publish(&self.state.borrow(), self.events, false, Some(self.id));
-            let response = self.generate_round(&request, prepared.as_ref()).await?;
+            let response = self
+                .generate_round(&request, prepared.as_ref(), context)
+                .await?;
             self.record_usage(&request, &response);
             let tools = self.save_response(response.generation?)?;
             if tools.calls.is_empty() {
@@ -101,30 +110,75 @@ impl Run<'_> {
         unreachable!("The last round returns before executing tools")
     }
 
-    async fn prepare_request(&mut self, request: &Value) -> Result<Option<Prepared>> {
+    async fn prepare_request(
+        &mut self,
+        request: &Value,
+        context: MetricContext,
+    ) -> Result<Option<Prepared>> {
+        self.store.metrics().record(
+            "cache_preparation_started",
+            Some(context),
+            json!({ "model": self.model }),
+        );
+        let started = Instant::now();
         if self.cache_disabled {
+            self.store.metrics().record(
+                "cache_decision",
+                Some(context),
+                json!({
+                    "action": "skip", "reason": "disabled_for_run", "model": self.model,
+                }),
+            );
+            self.record_preparation(context, started, "disabled", None);
             return Ok(None);
         }
         let prepared = tokio::select! {
             biased;
-            _ = self.cancel.cancelled() => bail!("Run stopped"),
-            result = self.prepare_cache(request) => result,
+            _ = self.cancel.cancelled() => {
+                self.record_preparation(context, started, "cancelled", None);
+                bail!("Run stopped");
+            },
+            result = self.prepare_cache(request, context) => result,
         };
         match prepared {
-            Ok(prepared) => Ok(prepared),
+            Ok(prepared) => {
+                self.record_preparation(context, started, "success", prepared.as_ref());
+                Ok(prepared)
+            }
             Err(error) => {
                 self.cache_disabled = true;
                 self.state.borrow_mut().cache_notice =
                     Some(format!("Cache unavailable: {error:#}"));
+                self.record_preparation(context, started, crate::gemini::error_kind(&error), None);
                 Ok(None)
             }
         }
+    }
+
+    fn record_preparation(
+        &self,
+        context: MetricContext,
+        started: Instant,
+        outcome: &str,
+        prepared: Option<&Prepared>,
+    ) {
+        let duration_ms = started.elapsed().as_secs_f64() * 1_000.;
+        self.store.metrics().record(
+            "cache_preparation_finished",
+            Some(context),
+            json!({
+                "outcome": outcome,
+                "duration_ms": duration_ms,
+                "selected_cache": prepared.map(|prepared| &prepared.cache),
+            }),
+        );
     }
 
     async fn generate_round(
         &mut self,
         request: &Value,
         prepared: Option<&Prepared>,
+        context: MetricContext,
     ) -> Result<RoundResponse> {
         let mut cached = prepared;
         let mut progress = StreamProgress {
@@ -137,17 +191,30 @@ impl Run<'_> {
             usage: None,
         };
         let started_at = now();
+        let mut attempt_number = 0;
         loop {
+            attempt_number += 1;
+            let mut attempt = metrics::Attempt::start(
+                self.store.metrics(),
+                context,
+                attempt_number,
+                self.model,
+                cached.map(|prepared| &prepared.cache),
+            );
             let body = cached.map_or(request, |prepared| &prepared.request);
-            let result = tokio::select! {
+            let (result, cancelled) = tokio::select! {
                 biased;
-                _ = self.cancel.cancelled() => Err(anyhow::anyhow!("Run stopped")),
-                result = self.gemini.generate(self.model.id(), body, |update| progress.update(update)) => result,
+                _ = self.cancel.cancelled() => (Err(anyhow::anyhow!("Run stopped")), true),
+                result = self.gemini.generate(self.model.id(), body, |update| {
+                    attempt.observe(&update);
+                    progress.update(update);
+                }) => (result, false),
             };
+            attempt.finish(&result, cancelled);
             if let Some(prepared) = cached
                 && progress.usage.is_none()
                 && result.as_ref().is_err_and(cache_rejected)
-                && self.reject_cache(&prepared.cache)?
+                && self.reject_cache(&prepared.cache, context)?
             {
                 cached = None;
                 self.cache_disabled = true;
@@ -287,6 +354,7 @@ struct StreamProgress<'a> {
 impl StreamProgress<'_> {
     fn update(&mut self, update: GenerationUpdate) {
         match update {
+            GenerationUpdate::ResponseStatus(_) | GenerationUpdate::FinishReason(_) => {}
             GenerationUpdate::Text(text) => {
                 self.record_activity();
                 self.state.borrow_mut().partial.push_str(&text);

@@ -320,6 +320,7 @@ impl Workspace {
         if self.rename.is_some() {
             return;
         }
+        self.close_diagram(cx);
         self.chat_menu = None;
         self.model_menu = None;
         if let Some(file) = &self.file

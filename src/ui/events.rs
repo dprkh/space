@@ -26,12 +26,12 @@ impl Workspace {
                 chat_id,
                 run_id,
                 text,
-            } => self.apply_delta(chat_id, run_id, text),
+            } => self.apply_delta(chat_id, run_id, text, cx),
             Event::ThoughtDelta {
                 chat_id,
                 run_id,
                 text,
-            } => self.apply_thought_delta(chat_id, run_id, text),
+            } => self.apply_thought_delta(chat_id, run_id, text, cx),
             Event::ContextTokens {
                 chat_id,
                 run_id,
@@ -108,8 +108,9 @@ impl Workspace {
         let previous_chat = self.chat.take();
         let (changed_content, changed) =
             self.transcript
-                .update_snapshot(previous_chat.as_ref(), &chat, opened);
+                .update_snapshot(previous_chat.as_ref(), &chat, opened, cx);
         if changed {
+            self.close_diagram(cx);
             self.model_menu = None;
             self.attachments = Default::default();
             self.submission = None;
@@ -122,7 +123,7 @@ impl Workspace {
         self.refresh_rows(changed_content, changed);
     }
 
-    fn apply_delta(&mut self, chat_id: Uuid, run_id: Uuid, text: String) {
+    fn apply_delta(&mut self, chat_id: Uuid, run_id: Uuid, text: String, cx: &mut Context<Self>) {
         if self.sidebar.runs.get(&chat_id) == Some(&run_id)
             && let Some(chat) = &mut self.chat
             && chat.id == chat_id
@@ -131,13 +132,19 @@ impl Workspace {
             self.transcript
                 .partial_markdown
                 .answer
-                .update(&chat.partial, true);
+                .update(&chat.partial, true, cx);
             let content_index = chat.contents.len();
             self.refresh_rows(content_index, false);
         }
     }
 
-    fn apply_thought_delta(&mut self, chat_id: Uuid, run_id: Uuid, text: String) {
+    fn apply_thought_delta(
+        &mut self,
+        chat_id: Uuid,
+        run_id: Uuid,
+        text: String,
+        cx: &mut Context<Self>,
+    ) {
         if self.sidebar.runs.get(&chat_id) == Some(&run_id)
             && let Some(chat) = &mut self.chat
             && chat.id == chat_id
@@ -146,7 +153,7 @@ impl Workspace {
             self.transcript
                 .partial_markdown
                 .thoughts
-                .update(&chat.partial_thoughts, true);
+                .update(&chat.partial_thoughts, true, cx);
             let content_index = chat.contents.len();
             self.refresh_rows(content_index, false);
         }

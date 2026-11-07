@@ -8,7 +8,7 @@ license = "MIT"
 
 [features]
 default = ["ui"]
-ui = ["dep:gpui", "dep:linkify", "dep:pulldown-cmark", "dep:syntect", "dep:unicode-segmentation"]
+ui = ["dep:gpui", "dep:image", "dep:linkify", "dep:mermaid-rs-renderer", "dep:pulldown-cmark", "dep:resvg", "dep:syntect", "dep:unicode-segmentation"]
 
 [[bin]]
 name = "space"
@@ -38,10 +38,13 @@ eventsource-stream = "0.2"
 fs2 = "0.4"
 futures-util = "0.3"
 gpui = { version = "=0.2.2", default-features = false, features = ["font-kit", "runtime_shaders"], optional = true }
+image = { version = "0.25", default-features = false, optional = true }
 libc = "0.2"
 linkify = { version = "0.11", optional = true }
+mermaid-rs-renderer = { version = "0.3.1", default-features = false, optional = true }
 pulldown-cmark = { version = "0.13", default-features = false, optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+resvg = { version = "0.45", default-features = false, features = ["text", "system-fonts"], optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"

@@ -10,6 +10,7 @@ pub(super) struct Submission {
 impl Workspace {
     pub(super) fn send(&mut self, _: &SendMessage, window: &mut Window, cx: &mut Context<Self>) {
         if self.file.is_some()
+            || self.expanded_diagram.is_some()
             || self.running()
             || self.waiting
             || self.submission.is_some()
@@ -151,17 +152,7 @@ impl Workspace {
                     .child(self.input.clone()),
             )
             .child(
-                div()
-                    .id("expand-composer")
-                    .size(px(22.))
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded_sm()
-                    .cursor_pointer()
-                    .hover(|style| style.bg(rgb(0x383842)))
-                    .child(composer_icon(expanded))
+                expansion_button("expand-composer", expanded)
                     .on_click(cx.listener(|this, _, window, cx| this.toggle_composer(window, cx))),
             )
     }
@@ -243,30 +234,4 @@ impl Workspace {
                 .on_click(cx.listener(|this, _, window, cx| this.send(&SendMessage, window, cx)))
         }
     }
-}
-
-fn composer_icon(expanded: bool) -> impl IntoElement {
-    canvas(
-        |_, _, _| (),
-        move |bounds, _, window, _| {
-            let center = bounds.center();
-            let (tip, tail, corner) = if expanded {
-                (1.5, 5., 5.)
-            } else {
-                (5., 0., 1.5)
-            };
-            let mut path = PathBuilder::stroke(px(1.5));
-            for sign in [-1., 1.] {
-                path.move_to(center + point(px(tail * sign), px(-tail * sign)));
-                path.line_to(center + point(px(tip * sign), px(-tip * sign)));
-                path.move_to(center + point(px(corner * sign), px(-tip * sign)));
-                path.line_to(center + point(px(tip * sign), px(-tip * sign)));
-                path.line_to(center + point(px(tip * sign), px(-corner * sign)));
-            }
-            if let Ok(path) = path.build() {
-                window.paint_path(path, rgb(0x9797a5));
-            }
-        },
-    )
-    .size(px(14.))
 }

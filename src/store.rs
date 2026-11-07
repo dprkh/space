@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 use crate::{
     fs::{open_regular, read_text},
+    metrics::Metrics,
     model::{Chat, Model, Status},
     project::Project,
 };
@@ -66,8 +67,14 @@ impl UiSettings {
 pub struct Store {
     dir: Dir,
     chats: Dir,
+    cache_cleanup: RefCell<Vec<CacheCleanup>>,
+    metrics: Metrics,
     _lock: std::fs::File,
-    cache_cleanup: RefCell<Vec<String>>,
+}
+
+pub(crate) struct CacheCleanup {
+    pub chat_id: Uuid,
+    pub cache: crate::cache::CachedPrefix,
 }
 
 impl Store {
@@ -106,11 +113,13 @@ impl Store {
             Err(error) => return Err(error.into()),
         }
         let chats = dir.open_dir_nofollow("chats")?;
+        let metrics = Metrics::open(&dir);
         Ok(Self {
             dir,
             chats,
             _lock: lock,
             cache_cleanup: RefCell::new(Vec::new()),
+            metrics,
         })
     }
 
@@ -133,15 +142,21 @@ impl Store {
         self.chats
             .remove_file(format!("{id}.json"))
             .context("Cannot delete the saved chat")?;
-        self.cache_cleanup
-            .borrow_mut()
-            .extend(caches.into_iter().map(|cache| cache.name));
+        self.cache_cleanup.borrow_mut().extend(
+            caches
+                .into_iter()
+                .map(|cache| CacheCleanup { chat_id: id, cache }),
+        );
         self.chats.try_clone()?.into_std_file().sync_all()?;
         Ok(())
     }
 
-    pub fn take_cache_cleanup(&self) -> Vec<String> {
+    pub(crate) fn take_cache_cleanup(&self) -> Vec<CacheCleanup> {
         std::mem::take(&mut *self.cache_cleanup.borrow_mut())
+    }
+
+    pub(crate) fn metrics(&self) -> &Metrics {
+        &self.metrics
     }
 
     pub fn preferences(&self) -> Result<Preferences> {

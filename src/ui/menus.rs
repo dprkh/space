@@ -65,6 +65,8 @@ impl Workspace {
         self.rename = None;
         if let Some(file) = &self.file {
             file.read(cx).focus_handle(cx).focus(window);
+        } else if let Some(diagram) = &self.expanded_diagram {
+            diagram.focus_handle(cx).focus(window);
         } else {
             self.input.read(cx).focus_handle(cx).focus(window);
         }
@@ -404,6 +406,8 @@ impl Workspace {
             self.cancel_rename(&CancelRename, window, cx);
         } else if self.chat_menu.take().is_some() {
             cx.notify();
+        } else if self.expanded_diagram.is_some() {
+            self.close_diagram(cx);
         } else if self.layout.composer_expanded {
             self.toggle_composer(window, cx);
         } else {

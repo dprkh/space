@@ -72,6 +72,7 @@ impl TranscriptState {
         previous_chat: Option<&Chat>,
         chat: &Chat,
         opened: bool,
+        cx: &mut App,
     ) -> (usize, bool) {
         let changed = previous_chat.is_none_or(|old| old.id != chat.id);
         let mut changed_content = previous_chat.filter(|_| !changed).map_or(0, |old| {
@@ -98,7 +99,7 @@ impl TranscriptState {
                 .insert((change.content_index, change.part_index), index);
             changed_content = changed_content.min(change.content_index);
         }
-        self.update_markdown(previous_chat, chat, changed_content, changed);
+        self.update_markdown(previous_chat, chat, changed_content, changed, cx);
         self.collapsed_thoughts.retain(|&index| {
             chat.contents
                 .get(index)
@@ -117,6 +118,7 @@ impl TranscriptState {
         chat: &Chat,
         changed_content: usize,
         changed: bool,
+        cx: &mut App,
     ) {
         let mut previous = std::mem::take(&mut self.markdown).into_iter();
         let mut partial = std::mem::take(&mut self.partial_markdown);
@@ -137,8 +139,12 @@ impl TranscriptState {
                     } else {
                         old
                     };
-                    markdown.answer.update(&content.visible_text(), !changed);
-                    markdown.thoughts.update(&content.thought_text(), !changed);
+                    markdown
+                        .answer
+                        .update(&content.visible_text(), !changed, cx);
+                    markdown
+                        .thoughts
+                        .update(&content.thought_text(), !changed, cx);
                     markdown
                 } else {
                     MessageText::default()
@@ -149,11 +155,13 @@ impl TranscriptState {
             partial = MessageText::default();
         }
         if changed || previous_chat.is_none_or(|old| old.partial != chat.partial) {
-            partial.answer.update(&chat.partial, !changed);
+            partial.answer.update(&chat.partial, !changed, cx);
         }
         if changed || previous_chat.is_none_or(|old| old.partial_thoughts != chat.partial_thoughts)
         {
-            partial.thoughts.update(&chat.partial_thoughts, !changed);
+            partial
+                .thoughts
+                .update(&chat.partial_thoughts, !changed, cx);
         }
         self.partial_markdown = partial;
     }

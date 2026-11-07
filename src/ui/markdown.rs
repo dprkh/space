@@ -1,3 +1,4 @@
+mod mermaid;
 mod text;
 
 pub use text::CachedText;
@@ -30,6 +31,7 @@ struct Node {
     kind: NodeKind,
     text: OnceCell<Rc<RichText>>,
     groups: OnceCell<Vec<Group>>,
+    diagram: Option<Entity<mermaid::Diagram>>,
 }
 
 enum Group {
@@ -55,11 +57,16 @@ impl Node {
             kind,
             text: OnceCell::new(),
             groups: OnceCell::new(),
+            diagram: None,
         }
     }
 
     fn rich_text(&self, animate: bool) -> RichTextView {
-        let text = self.text.get_or_init(|| {
+        RichTextView::new(self.text().clone(), animate)
+    }
+
+    fn text(&self) -> &Rc<RichText> {
+        self.text.get_or_init(|| {
             let mut text = match &self.kind {
                 NodeKind::Element(tag, children) => {
                     RichText::new(children, !matches!(tag, Tag::CodeBlock(_)))
@@ -88,8 +95,7 @@ impl Node {
                     .collect();
             }
             Rc::new(text)
-        });
-        RichTextView::new(text.clone(), animate)
+        })
     }
 
     fn reuse(&mut self, previous: Self) {
@@ -106,10 +112,31 @@ impl Node {
             }
         }
     }
+
+    fn prepare_diagrams(&mut self, cx: &mut App) {
+        if self.diagram.is_some() {
+            return;
+        }
+        if let NodeKind::Element(Tag::CodeBlock(CodeBlockKind::Fenced(info)), _) = &self.kind
+            && info
+                .split_whitespace()
+                .next()
+                .is_some_and(|language| language.eq_ignore_ascii_case("mermaid"))
+        {
+            let text = self.text().clone();
+            self.diagram = Some(cx.new(|cx| mermaid::Diagram::new(text, cx)));
+            return;
+        }
+        if let NodeKind::Element(_, children) = &mut self.kind {
+            for child in children {
+                child.prepare_diagrams(cx);
+            }
+        }
+    }
 }
 
 impl Markdown {
-    pub fn update(&mut self, source: &str, animate: bool) {
+    pub fn update(&mut self, source: &str, animate: bool, cx: &mut App) {
         let options =
             Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
         let nodes = parse_nodes(&mut Parser::new_ext(source, options));
@@ -125,6 +152,7 @@ impl Markdown {
                     }
                     node.reuse(previous.node);
                 }
+                node.prepare_diagrams(cx);
                 Block { node, updated_at }
             })
             .collect();
@@ -251,38 +279,14 @@ fn render_block(node: &Node, animate: bool) -> AnyElement {
             .child(render_nodes(node, animate))
             .into_any_element(),
         Tag::CodeBlock(kind) => {
+            if let Some(diagram) = &node.diagram {
+                return diagram.clone().into_any_element();
+            }
             let language = match kind {
                 CodeBlockKind::Fenced(info) => info.split_whitespace().next().unwrap_or(""),
                 CodeBlockKind::Indented => "",
             };
-            let text = node.rich_text(animate);
-            div()
-                .min_w_0()
-                .rounded_md()
-                .bg(rgb(0x18181e))
-                .when(!language.is_empty(), |view| {
-                    view.child(
-                        div()
-                            .px_3()
-                            .pt_2()
-                            .text_xs()
-                            .text_color(rgb(0x9797a5))
-                            .child(language.to_owned()),
-                    )
-                })
-                .child(
-                    div()
-                        .id("code")
-                        .min_w_0()
-                        .overflow_x_scroll()
-                        .p_3()
-                        .font_family("Menlo")
-                        .text_size(px(13.))
-                        .line_height(px(21.))
-                        .whitespace_nowrap()
-                        .child(text),
-                )
-                .into_any_element()
+            render_code_block(language, node.rich_text(animate)).into_any_element()
         }
         Tag::List(start) => div()
             .flex()
@@ -338,6 +342,35 @@ fn render_block(node: &Node, animate: bool) -> AnyElement {
         Tag::Table(alignments) => render_table(alignments, children, animate).into_any_element(),
         _ => render_nodes(node, animate).into_any_element(),
     }
+}
+
+fn render_code_block(language: &str, text: RichTextView) -> Div {
+    div()
+        .min_w_0()
+        .rounded_md()
+        .bg(rgb(0x18181e))
+        .when(!language.is_empty(), |view| {
+            view.child(
+                div()
+                    .px_3()
+                    .pt_2()
+                    .text_xs()
+                    .text_color(rgb(0x9797a5))
+                    .child(language.to_owned()),
+            )
+        })
+        .child(
+            div()
+                .id("code")
+                .min_w_0()
+                .overflow_x_scroll()
+                .p_3()
+                .font_family("Menlo")
+                .text_size(px(13.))
+                .line_height(px(21.))
+                .whitespace_nowrap()
+                .child(text),
+        )
 }
 
 fn task_state(node: &Node) -> Option<bool> {

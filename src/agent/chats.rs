@@ -396,8 +396,18 @@ pub(super) async fn serve(
     let _ = events.try_send(Event::Chats(store.list()?));
     controller.chats[&controller.selected].publish(events, true);
     loop {
-        for name in store.take_cache_cleanup() {
-            cleanups.push(gemini.delete_cache(name));
+        for cleanup in store.take_cache_cleanup() {
+            cleanups.push(super::cache_metrics::delete_cache(
+                &gemini,
+                store,
+                cleanup.cache,
+                Some(crate::metrics::Context {
+                    chat_id: cleanup.chat_id,
+                    run_id: None,
+                    round: None,
+                }),
+                "chat_deleted",
+            ));
         }
         let command = tokio::select! {
             biased;
@@ -423,8 +433,18 @@ pub(super) async fn serve(
     while let Some((id, run_id, result)) = runs.next().await {
         controller.finish_run(id, run_id, result);
     }
-    for name in store.take_cache_cleanup() {
-        cleanups.push(gemini.delete_cache(name));
+    for cleanup in store.take_cache_cleanup() {
+        cleanups.push(super::cache_metrics::delete_cache(
+            &gemini,
+            store,
+            cleanup.cache,
+            Some(crate::metrics::Context {
+                chat_id: cleanup.chat_id,
+                run_id: None,
+                round: None,
+            }),
+            "chat_deleted",
+        ));
     }
     while cleanups.next().await.is_some() {}
     Ok(())

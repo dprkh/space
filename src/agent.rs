@@ -1,3 +1,4 @@
+mod cache_metrics;
 mod chats;
 mod run;
 mod sidebar;

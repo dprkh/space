@@ -11,7 +11,9 @@ use crate::pdf::Pdf;
 
 pub const MODEL: &str = "gemini-4-argon";
 pub const CONTEXT_WINDOW_TOKENS: u64 = 1_048_576;
-pub const SYSTEM: &str = "";
+pub const SYSTEM: &str = "\
+Do not use LaTeX.
+Mermaid diagrams are supported in fenced `mermaid` code blocks.";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Model {
@@ -22,10 +24,15 @@ pub enum Model {
     Flash38,
 }
 
+#[derive(Serialize)]
 pub struct Prices {
+    #[serde(rename = "input_usd_per_million_tokens")]
     pub input: f64,
+    #[serde(rename = "cached_usd_per_million_tokens")]
     pub cached: f64,
+    #[serde(rename = "output_usd_per_million_tokens")]
     pub output: f64,
+    #[serde(rename = "storage_usd_per_million_token_hours")]
     pub storage: f64,
 }
 

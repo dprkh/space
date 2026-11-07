@@ -35,6 +35,32 @@ pub fn cache_rejected(error: &anyhow::Error) -> bool {
     })
 }
 
+pub(crate) fn error_status(error: &anyhow::Error) -> Option<u16> {
+    error
+        .downcast_ref::<ApiError>()
+        .map(|error| error.status.as_u16())
+        .or_else(|| {
+            error
+                .downcast_ref::<reqwest::Error>()?
+                .status()
+                .map(|status| status.as_u16())
+        })
+}
+
+pub(crate) fn error_kind(error: &anyhow::Error) -> &'static str {
+    if error_status(error).is_some() {
+        return "http_error";
+    }
+    if let Some(error) = error.downcast_ref::<reqwest::Error>() {
+        return if error.is_timeout() {
+            "timeout"
+        } else {
+            "transport_error"
+        };
+    }
+    "error"
+}
+
 pub struct Gemini {
     client: reqwest::Client,
     endpoint: String,
@@ -42,6 +68,8 @@ pub struct Gemini {
 }
 
 pub enum GenerationUpdate {
+    ResponseStatus(u16),
+    FinishReason(String),
     Text(String),
     Thought(String),
     Usage(Usage),
@@ -123,7 +151,11 @@ impl Gemini {
         .into())
     }
 
-    pub async fn create_cache(&self, body: &Value) -> Result<CreatedCache> {
+    pub async fn create_cache(
+        &self,
+        body: &Value,
+        on_response: impl FnOnce(u16),
+    ) -> Result<CreatedCache> {
         ensure!(
             !self.key.trim().is_empty(),
             "Set GEMINI_API_KEY before creating a cache"
@@ -135,6 +167,7 @@ impl Gemini {
             .json(body)
             .send()
             .await?;
+        on_response(response.status().as_u16());
         let data: Value = self.check_response(response).await?.json().await?;
         let name = data["name"]
             .as_str()
@@ -159,15 +192,15 @@ impl Gemini {
         })
     }
 
-    pub async fn delete_cache(&self, name: String) {
-        if let Ok(url) = self.cache_url(&name) {
-            let _ = self
-                .client
-                .delete(url)
-                .timeout(Duration::from_secs(3))
-                .send()
-                .await;
-        }
+    pub async fn delete_cache(&self, name: String) -> Result<reqwest::StatusCode> {
+        let url = self.cache_url(&name)?;
+        let response = self
+            .client
+            .delete(url)
+            .timeout(Duration::from_secs(3))
+            .send()
+            .await?;
+        Ok(response.status())
     }
 
     pub async fn generate(
@@ -195,6 +228,7 @@ impl Gemini {
             .send()
             .await
             .context("Cannot connect to Google")?;
+        on_update(GenerationUpdate::ResponseStatus(response.status().as_u16()));
         let response = self.check_response(response).await?;
         let mut events = response.bytes_stream().eventsource();
         let mut generation = Generation::new();
@@ -252,6 +286,7 @@ impl Gemini {
             }
             if let Some(reason) = candidate["finishReason"].as_str() {
                 generation.finish_reason = reason.into();
+                on_update(GenerationUpdate::FinishReason(reason.into()));
             }
         }
         Ok(())
