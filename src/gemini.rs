@@ -311,7 +311,7 @@ impl Generation {
             "Response stream ended before completion"
         );
         ensure!(
-            !self.content.parts.is_empty(),
+            !self.content.parts.is_empty() || self.finish_reason == "STOP",
             "Google returned an empty response ({})",
             self.finish_reason
         );

@@ -16,6 +16,7 @@ impl Workspace {
             && !self.waiting
             && !self.pending_open
             && self.submission.is_none()
+            && self.message_edit.is_none()
             && self.attachments.loading.is_none()
             && self.file.is_none()
             && self.rename.is_none()

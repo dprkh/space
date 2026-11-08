@@ -112,15 +112,18 @@ impl Workspace {
             "model-selector",
             div()
                 .flex()
+                .min_w_0()
                 .items_center()
                 .gap_2()
-                .child(if next {
+                .child(div().min_w_0().truncate().child(if next {
                     format!("Next: {name}")
                 } else {
                     name.into()
-                })
+                }))
                 .child(disclosure_arrow(true)),
         )
+        .min_w_0()
+        .max_w_full()
         .flex_shrink_0()
         .on_click(cx.listener(|this, event: &ClickEvent, window, cx| {
             cx.stop_propagation();
@@ -408,6 +411,8 @@ impl Workspace {
             cx.notify();
         } else if self.expanded_diagram.is_some() {
             self.close_diagram(cx);
+        } else if self.message_edit.is_some() {
+            self.cancel_message_edit(window, cx);
         } else if self.layout.composer_expanded {
             self.toggle_composer(window, cx);
         } else {

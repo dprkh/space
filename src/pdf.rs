@@ -2,11 +2,12 @@ use std::{io::Read, sync::Arc};
 
 use anyhow::{Result, ensure};
 use base64::{Engine, prelude::BASE64_STANDARD};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 const MAX_PDF_SIZE: u64 = 50_000_000;
 
-#[derive(Clone)]
+#[derive(Clone, Deserialize, Serialize)]
 pub struct Pdf {
     name: String,
     data: Arc<str>,

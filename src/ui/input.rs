@@ -1,7 +1,12 @@
+mod state;
+mod vim;
+pub(super) use state::InputState;
+
 use std::{borrow::Cow, ops::Range};
 
 use gpui::{prelude::*, *};
 use unicode_segmentation::UnicodeSegmentation;
+use vim::{Mode, Vim};
 
 actions!(
     input,
@@ -22,14 +27,17 @@ actions!(
         Paste,
         Cut,
         Copy,
-        Newline
+        Newline,
+        InsertTab,
+        ConfirmLineJump,
+        NormalMode
     ]
 );
 
 const LINE_HEIGHT: f32 = 22.;
 
 pub fn bind_keys(cx: &mut App) {
-    for context in ["Composer", "ChatName"] {
+    for context in ["Composer && VimInsert", "ChatName"] {
         cx.bind_keys([
             KeyBinding::new("backspace", Backspace, Some(context)),
             KeyBinding::new("delete", Delete, Some(context)),
@@ -41,15 +49,27 @@ pub fn bind_keys(cx: &mut App) {
             KeyBinding::new("shift-right", SelectRight, Some(context)),
             KeyBinding::new("shift-up", SelectUp, Some(context)),
             KeyBinding::new("shift-down", SelectDown, Some(context)),
-            KeyBinding::new("cmd-a", SelectAll, Some(context)),
-            KeyBinding::new("cmd-v", Paste, Some(context)),
-            KeyBinding::new("cmd-c", Copy, Some(context)),
-            KeyBinding::new("cmd-x", Cut, Some(context)),
             KeyBinding::new("cmd-left", Home, Some(context)),
             KeyBinding::new("cmd-right", End, Some(context)),
         ]);
     }
-    cx.bind_keys([KeyBinding::new("shift-enter", Newline, Some("Composer"))]);
+    for context in ["Composer && !VimCommand", "ChatName"] {
+        cx.bind_keys([
+            KeyBinding::new("cmd-a", SelectAll, Some(context)),
+            KeyBinding::new("cmd-v", Paste, Some(context)),
+            KeyBinding::new("cmd-c", Copy, Some(context)),
+            KeyBinding::new("cmd-x", Cut, Some(context)),
+        ]);
+    }
+    cx.bind_keys([
+        KeyBinding::new("enter", ConfirmLineJump, Some("Composer && VimCommand")),
+        KeyBinding::new("cmd-enter", ConfirmLineJump, Some("Composer && VimCommand")),
+        KeyBinding::new("enter", Newline, Some("Composer && VimInsert")),
+        KeyBinding::new("shift-enter", Newline, Some("Composer && VimInsert")),
+        KeyBinding::new("tab", InsertTab, Some("Composer && VimInsert")),
+        KeyBinding::new("escape", NormalMode, Some("Composer")),
+        KeyBinding::new("ctrl-[", NormalMode, Some("Composer")),
+    ]);
 }
 
 struct InputLine {
@@ -73,6 +93,7 @@ pub struct Input {
     dragging: bool,
     single_line: bool,
     scroll_x: Pixels,
+    vim: Vim,
 }
 
 impl Input {
@@ -92,6 +113,7 @@ impl Input {
             dragging: false,
             single_line: false,
             scroll_x: px(0.),
+            vim: Vim::default(),
         }
     }
 
@@ -100,6 +122,12 @@ impl Input {
         input.selection = 0..text.len();
         input.text = text;
         input.single_line = true;
+        input
+    }
+
+    pub fn with_text(text: String, cx: &mut Context<Self>) -> Self {
+        let mut input = Self::new(cx);
+        input.text = text;
         input
     }
 
@@ -112,6 +140,8 @@ impl Input {
         self.scroll_x = px(0.);
         self.content_height = px(0.);
         self.reveal_cursor = true;
+        self.reversed = false;
+        self.vim = Vim::default();
         cx.notify();
     }
 
@@ -128,6 +158,11 @@ impl Input {
     }
 
     fn cursor(&self) -> usize {
+        if !self.single_line
+            && let Mode::Visual { cursor, .. } = self.vim.mode
+        {
+            return cursor;
+        }
         if self.reversed {
             self.selection.start
         } else {
@@ -159,20 +194,32 @@ impl Input {
     }
 
     fn previous(&self) -> usize {
-        self.text[..self.cursor()]
+        self.previous_at(self.cursor())
+    }
+
+    fn previous_at(&self, offset: usize) -> usize {
+        self.text[..offset]
             .grapheme_indices(true)
             .next_back()
             .map_or(0, |(i, _)| i)
     }
 
     fn next(&self) -> usize {
-        self.text[self.cursor()..]
+        self.next_at(self.cursor())
+    }
+
+    fn next_at(&self, offset: usize) -> usize {
+        self.text[offset..]
             .graphemes(true)
             .next()
-            .map_or(self.text.len(), |g| self.cursor() + g.len())
+            .map_or(self.text.len(), |g| offset + g.len())
     }
 
     fn move_to(&mut self, offset: usize, extend: bool, cx: &mut Context<Self>) {
+        if !self.is_insert_mode() {
+            self.vim_move_to(offset, extend, cx);
+            return;
+        }
         let anchor = if extend {
             if self.reversed {
                 self.selection.end
@@ -217,7 +264,12 @@ impl Input {
         self.move_to(self.next(), true, cx);
     }
     fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.is_insert_mode() {
+            self.vim_select_all(cx);
+            return;
+        }
         self.selection = 0..self.text.len();
+        self.reversed = false;
         self.reveal_cursor = true;
         cx.notify();
     }
@@ -242,7 +294,14 @@ impl Input {
     fn newline(&mut self, _: &Newline, window: &mut Window, cx: &mut Context<Self>) {
         self.replace_text_in_range(None, "\n", window, cx);
     }
+    fn insert_tab(&mut self, _: &InsertTab, window: &mut Window, cx: &mut Context<Self>) {
+        self.replace_text_in_range(None, "\t", window, cx);
+    }
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.is_insert_mode() {
+            self.vim_copy(cx);
+            return;
+        }
         if !self.selection.is_empty() {
             cx.write_to_clipboard(ClipboardItem::new_string(
                 self.text[self.selection.clone()].into(),
@@ -250,10 +309,18 @@ impl Input {
         }
     }
     fn cut(&mut self, _: &Cut, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.is_insert_mode() {
+            self.vim_cut(cx);
+            return;
+        }
         self.copy(&Copy, window, cx);
         self.replace_text_in_range(None, "", window, cx);
     }
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.is_insert_mode() {
+            self.vim_paste(false, 1, cx);
+            return;
+        }
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
             self.replace_text_in_range(None, &text.replace("\r\n", "\n"), window, cx);
         }
@@ -331,32 +398,99 @@ impl Input {
     }
 
     fn paint(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
-        self.bounds = bounds;
-        if !self.layout_lines(bounds, window) {
+        let gutter_width = self
+            .line_number_width(window)
+            .min((bounds.size.width - px(1.)).max(px(0.)));
+        let gutter = Bounds::new(bounds.origin, size(gutter_width, bounds.size.height));
+        let text_bounds = Bounds::new(
+            bounds.origin + point(gutter_width, px(0.)),
+            size(
+                (bounds.size.width - gutter_width).max(px(0.)),
+                bounds.size.height,
+            ),
+        );
+        self.bounds = text_bounds;
+        if !self.layout_lines(text_bounds, window) {
             return;
         }
-        self.reveal_caret(bounds);
+        self.reveal_caret(text_bounds);
         self.position_lines();
-        window.handle_input(
-            &self.focus,
-            ElementInputHandler::new(bounds, cx.entity()),
-            cx,
+        if self.is_insert_mode() {
+            window.handle_input(
+                &self.focus,
+                ElementInputHandler::new(text_bounds, cx.entity()),
+                cx,
+            );
+        }
+        if gutter_width > px(0.) {
+            window.with_content_mask(Some(ContentMask { bounds: gutter }), |window| {
+                self.paint_line_numbers(gutter, window, cx);
+            });
+        }
+        window.with_content_mask(
+            Some(ContentMask {
+                bounds: text_bounds,
+            }),
+            |window| {
+                self.paint_visible_lines(text_bounds, window, cx);
+                self.paint_caret(window);
+            },
         );
-        window.with_content_mask(Some(ContentMask { bounds }), |window| {
-            self.paint_visible_lines(bounds, window, cx);
-            self.paint_caret(window);
-        });
+    }
+
+    fn line_number_width(&self, window: &Window) -> Pixels {
+        if self.single_line {
+            return px(0.);
+        }
+        let count = self.text.bytes().filter(|&byte| byte == b'\n').count() + 1;
+        let text: SharedString = count.to_string().into();
+        let style = TextStyle {
+            font_family: "Menlo".into(),
+            ..Default::default()
+        };
+        window
+            .text_system()
+            .shape_line(text.clone(), px(13.), &[style.to_run(text.len())], None)
+            .width
+            + px(20.)
+    }
+
+    fn paint_line_numbers(
+        &self,
+        bounds: Bounds<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let cursor = self.cursor();
+        for (index, entry) in self.lines.iter().enumerate() {
+            if entry.origin.y >= bounds.bottom() {
+                break;
+            }
+            if entry.origin.y + px(LINE_HEIGHT) <= bounds.top() {
+                continue;
+            }
+            let active = cursor >= entry.start && cursor <= entry.start + entry.line.len();
+            let text: SharedString = (index + 1).to_string().into();
+            let style = TextStyle {
+                font_family: "Menlo".into(),
+                color: rgb(if active { 0x9797a5 } else { 0x626270 }).into(),
+                ..Default::default()
+            };
+            let number = window.text_system().shape_line(
+                text.clone(),
+                px(13.),
+                &[style.to_run(text.len())],
+                None,
+            );
+            let origin = point(bounds.right() - px(12.) - number.width, entry.origin.y);
+            let _ = number.paint(origin, px(LINE_HEIGHT), window, cx);
+        }
     }
 
     fn styled_text(&self, window: &Window) -> (SharedString, Vec<TextRun>) {
         let placeholder = self.text.is_empty();
         let text: SharedString = if placeholder {
-            if self.single_line {
-                "Chat name"
-            } else {
-                "Send a message…"
-            }
-            .into()
+            if self.single_line { "Chat name" } else { "" }.into()
         } else {
             self.text.clone().into()
         };
@@ -481,10 +615,18 @@ impl Input {
 
     fn paint_caret(&self, window: &mut Window) {
         if self.focus.is_focused(window)
-            && self.selection.is_empty()
-            && let Some(caret) = self.caret_bounds(self.cursor())
+            && (self.selection.is_empty() || !self.is_insert_mode())
+            && let Some(mut caret) = self.caret_bounds(self.cursor())
         {
-            window.paint_quad(fill(caret, rgb(0xb7b7ed)));
+            if self.is_insert_mode() {
+                window.paint_quad(fill(caret, rgb(0xb7b7ed)));
+            } else {
+                caret.size.width = self
+                    .caret_bounds(self.next())
+                    .filter(|next| next.top() == caret.top() && next.left() > caret.left())
+                    .map_or(px(8.), |next| next.left() - caret.left());
+                window.paint_quad(fill(caret, rgba(0xb7b7ed88)));
+            }
         }
     }
 }
@@ -526,6 +668,9 @@ impl EntityInputHandler for Input {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.is_insert_mode() {
+            return;
+        }
         let text = if self.single_line {
             Cow::Owned(text.replace(['\n', '\r'], " "))
         } else {
@@ -535,10 +680,7 @@ impl EntityInputHandler for Input {
             .map(|r| self.range_to_utf8(r))
             .or(self.marked.clone())
             .unwrap_or(self.selection.clone());
-        self.text.replace_range(range.clone(), &text);
-        self.revision += 1;
-        self.marked = None;
-        self.move_to(range.start + text.len(), false, cx);
+        self.edit(range, &text, cx);
     }
     fn replace_and_mark_text_in_range(
         &mut self,
@@ -548,6 +690,9 @@ impl EntityInputHandler for Input {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.is_insert_mode() {
+            return;
+        }
         let range = range
             .map(|r| self.range_to_utf8(r))
             .or(self.marked.clone())
@@ -594,11 +739,9 @@ impl Render for Input {
             .h_full()
             .min_h_0()
             .min_w_0()
-            .key_context(if self.single_line {
-                "ChatName"
-            } else {
-                "Composer"
-            })
+            .flex()
+            .flex_col()
+            .key_context(self.key_context())
             .track_focus(&self.focus)
             .cursor(CursorStyle::IBeam)
             .on_action(cx.listener(Self::left))
@@ -618,13 +761,22 @@ impl Render for Input {
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::newline))
+            .on_action(cx.listener(Self::insert_tab))
+            .on_action(cx.listener(Self::normal_mode))
+            .on_action(cx.listener(Self::confirm_line_jump))
+            .on_key_down(cx.listener(Self::vim_key_down))
             .on_scroll_wheel(cx.listener(Self::scroll_wheel))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
                     this.focus.focus(window);
                     this.dragging = true;
-                    this.move_to(this.index_at(event.position), event.modifiers.shift, cx);
+                    let offset = this.index_at(event.position);
+                    if this.is_insert_mode() {
+                        this.move_to(offset, event.modifiers.shift, cx);
+                    } else {
+                        this.vim_mouse_down(offset, event.modifiers.shift, cx);
+                    }
                 }),
             )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
@@ -647,7 +799,21 @@ impl Render for Input {
                         input.update(cx, |input, cx| input.paint(bounds, window, cx));
                     },
                 )
-                .size_full(),
+                .w_full()
+                .flex_1()
+                .min_h_0(),
             )
+            .when(!self.single_line, |view| {
+                view.child(
+                    div()
+                        .w_full()
+                        .flex_shrink_0()
+                        .mt_1()
+                        .text_xs()
+                        .text_color(rgb(0x91919f))
+                        .truncate()
+                        .child(self.vim_status()),
+                )
+            })
     }
 }

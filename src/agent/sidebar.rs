@@ -105,6 +105,11 @@ pub(super) async fn serve(
             )));
         }
     }
+    let _ = events.try_send(Event::WorkspaceView(
+        store
+            .workspace_view()
+            .map_err(|error| format!("Cannot load workspace view: {error:#}")),
+    ));
     loop {
         let command = tokio::select! {
             biased;
@@ -136,6 +141,26 @@ pub(super) async fn serve(
             }
         };
         match command {
+            SidebarCommand::LoadChatView(chat_id) => {
+                let result = store
+                    .chat_view(chat_id)
+                    .map_err(|error| format!("Cannot load saved input: {error:#}"));
+                let _ = events.try_send(Event::ChatView { chat_id, result });
+            }
+            SidebarCommand::SaveChatView { chat_id, json } => {
+                if let Err(error) = store.save_chat_view(chat_id, &json) {
+                    let _ = events.try_send(Event::SettingsError(format!(
+                        "Cannot save chat view: {error:#}"
+                    )));
+                }
+            }
+            SidebarCommand::SaveWorkspaceView(json) => {
+                if let Err(error) = store.save_workspace_view(&json) {
+                    let _ = events.try_send(Event::SettingsError(format!(
+                        "Cannot save workspace view: {error:#}"
+                    )));
+                }
+            }
             SidebarCommand::SaveSettings(settings) => {
                 if let Err(error) = store.save_ui_settings(settings) {
                     let _ = events.try_send(Event::SettingsError(format!(

@@ -119,6 +119,36 @@ impl<'a> ChatController<'a> {
                 return Ok(result.ok());
             }
             Command::Retry(id) => return self.retry(id).map(Some),
+            Command::EditMessage {
+                chat_id,
+                submission_id,
+                content_index,
+                text,
+            } => {
+                let result = self.edit_message(chat_id, content_index, text);
+                let _ = self.events.try_send(Event::SendResult {
+                    chat_id,
+                    submission_id,
+                    result: result
+                        .as_ref()
+                        .map(|_| ())
+                        .map_err(|error| format!("{error:#}")),
+                });
+                return Ok(result.ok());
+            }
+            Command::SelectMessageVersion {
+                chat_id,
+                content_index,
+                version,
+            } => {
+                self.select_message_version(chat_id, content_index, version)?;
+            }
+            Command::DeleteMessage {
+                chat_id,
+                content_index,
+            } => {
+                self.delete_message(chat_id, content_index)?;
+            }
             Command::Stop(id) => self.stop(id),
             Command::Rename { chat_id, title } => self.rename(chat_id, title)?,
             Command::SetArchived { chat_id, archived } => self.set_archived(chat_id, archived)?,
@@ -143,19 +173,77 @@ impl<'a> ChatController<'a> {
             !chat.archived,
             "Unarchive this chat before sending a message"
         );
-        let text = text.trim();
         ensure!(!text.is_empty() || !pdfs.is_empty(), "The message is empty");
         let model = Model::from_id(&chat.model)
             .context("Select a supported model before sending a message")?;
         chat.system = self.project.system_prompt()?;
         chat.tools = declarations();
         let has_pdfs = !pdfs.is_empty();
-        chat.push_user(text, pdfs);
+        chat.push_user(&text, pdfs);
         chat.partial_model = model;
         if has_pdfs {
             check_pdf_capacity(&chat)?;
         }
         live.start_run(chat, self.store, self.events, self.exit)
+    }
+
+    fn edit_message(
+        &mut self,
+        chat_id: Uuid,
+        content_index: usize,
+        text: String,
+    ) -> Result<RunTask> {
+        let live = live_chat(&mut self.chats, self.store, chat_id)?;
+        ensure!(live.run.is_none(), "This chat is already running");
+        let mut chat = live.state.borrow().clone();
+        ensure!(
+            !chat.archived,
+            "Unarchive this chat before editing a message"
+        );
+        let model = Model::from_id(&chat.model)
+            .context("Select a supported model before editing a message")?;
+        chat.system = self.project.system_prompt()?;
+        chat.tools = declarations();
+        chat.edit_message(content_index, &text)?;
+        chat.partial_model = model;
+        live.start_run(chat, self.store, self.events, self.exit)
+    }
+
+    fn select_message_version(
+        &mut self,
+        chat_id: Uuid,
+        content_index: usize,
+        version: usize,
+    ) -> Result<()> {
+        let live = live_chat(&mut self.chats, self.store, chat_id)?;
+        ensure!(
+            live.run.is_none(),
+            "Stop this chat before changing branches"
+        );
+        let mut chat = live.state.borrow().clone();
+        chat.select_message_version(content_index, version)?;
+        self.store.save(&mut chat)?;
+        *live.state.borrow_mut() = chat;
+        live.publish(self.events, true);
+        Ok(())
+    }
+
+    fn delete_message(&mut self, chat_id: Uuid, content_index: usize) -> Result<()> {
+        let live = live_chat(&mut self.chats, self.store, chat_id)?;
+        ensure!(
+            live.run.is_none(),
+            "Stop this chat before deleting a message"
+        );
+        let mut chat = live.state.borrow().clone();
+        ensure!(
+            !chat.archived,
+            "Unarchive this chat before deleting a message"
+        );
+        chat.delete_message(content_index)?;
+        self.store.save(&mut chat)?;
+        *live.state.borrow_mut() = chat;
+        live.publish(self.events, true);
+        Ok(())
     }
 
     fn retry(&mut self, chat_id: Uuid) -> Result<RunTask> {

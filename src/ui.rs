@@ -9,6 +9,8 @@ mod input;
 mod layout;
 mod markdown;
 mod menus;
+mod messages;
+mod session;
 mod sidebar;
 mod status;
 mod syntax;
@@ -61,9 +63,9 @@ pub fn run(
 ) {
     syntax::initialize();
     Application::new().run(move |cx: &mut App| {
-        input::bind_keys(cx);
         cx.bind_keys([
-            KeyBinding::new("enter", SendMessage, Some("Composer")),
+            KeyBinding::new("enter", SendMessage, Some("Composer && VimNormal")),
+            KeyBinding::new("cmd-enter", SendMessage, Some("Composer && !VimCommand")),
             KeyBinding::new("enter", ConfirmRename, Some("ChatName")),
             KeyBinding::new("escape", CancelRename, Some("ChatName")),
             KeyBinding::new("escape", Stop, None),
@@ -76,6 +78,7 @@ pub fn run(
             KeyBinding::new("cmd-q", Quit, None),
             KeyBinding::new("cmd-w", Close, None),
         ]);
+        input::bind_keys(cx);
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.on_window_closed(|cx| {
             if cx.windows().is_empty() {
@@ -87,7 +90,7 @@ pub fn run(
         let result = cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Fullscreen(bounds)),
-                window_min_size: Some(size(px(640.), px(480.))),
+                window_min_size: Some(size(px(layout::MIN_WINDOW_WIDTH), px(480.))),
                 titlebar: Some(TitlebarOptions {
                     title: Some("Space".into()),
                     ..Default::default()
@@ -115,6 +118,8 @@ struct Workspace {
     input: Entity<Input>,
     attachments: attachments::AttachmentState,
     submission: Option<composer::Submission>,
+    message_edit: Option<messages::MessageEdit>,
+    pending_message_version: Option<usize>,
     chat: Option<Chat>,
     file: Option<Entity<file::FileView>>,
     expanded_diagram: Option<diagram::ExpandedDiagram>,
@@ -129,6 +134,9 @@ struct Workspace {
     error: Option<String>,
     waiting: bool,
     pending_open: bool,
+    restoring_view: Option<Uuid>,
+    view_loaded: Option<Uuid>,
+    workspace_view_loaded: bool,
 }
 
 impl Workspace {
@@ -141,6 +149,19 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Self {
         file::initialize(window);
+        cx.on_release(|this, cx| {
+            if let Err(error) = this.save_view(cx) {
+                eprintln!("Cannot save the workspace view: {error:#}");
+            }
+        })
+        .detach();
+        cx.on_app_quit(|this, cx| {
+            if let Err(error) = this.save_view(cx) {
+                eprintln!("Cannot save the workspace view: {error:#}");
+            }
+            async {}
+        })
+        .detach();
         let input = cx.new(Input::new);
         let tree = cx.new(|_| FileTree::new(sidebar_commands.clone()));
         cx.subscribe_in(&tree, window, |this, _, event: &OpenFile, window, cx| {
@@ -152,11 +173,11 @@ impl Workspace {
             this.transcript.follow_output = !event.is_scrolled;
         }));
         input.read(cx).focus_handle(cx).focus(window);
-        cx.spawn(async move |view, cx| {
+        cx.spawn_in(window, async move |view, cx| {
             while let Ok(event) = events.recv().await {
                 if view
-                    .update(cx, |view, cx| {
-                        view.event(event, cx);
+                    .update_in(cx, |view, window, cx| {
+                        view.event(event, window, cx);
                         cx.notify();
                     })
                     .is_err()
@@ -170,6 +191,7 @@ impl Workspace {
                 );
                 view.waiting = false;
                 view.submission = None;
+                view.restoring_view = None;
                 if let Some(file) = &view.file {
                     file.update(cx, |file, cx| {
                         file.fail(
@@ -190,6 +212,8 @@ impl Workspace {
             input,
             attachments: attachments::AttachmentState::default(),
             submission: None,
+            message_edit: None,
+            pending_message_version: None,
             chat: None,
             file: None,
             expanded_diagram: None,
@@ -204,6 +228,9 @@ impl Workspace {
             error: None,
             waiting: true,
             pending_open: false,
+            restoring_view: None,
+            view_loaded: None,
+            workspace_view_loaded: false,
         }
     }
 
@@ -242,7 +269,7 @@ impl Workspace {
     }
 
     fn command(&mut self, command: Command, cx: &mut Context<Self>) {
-        if self.pending_open {
+        if self.pending_open || self.restoring_view.is_some() {
             return;
         }
         self.chat_menu = None;
@@ -277,21 +304,19 @@ impl Workspace {
         }
         div()
             .flex_1()
-            .min_w_0()
+            .relative()
+            .min_w(self.conversation_min_width())
             .h_full()
             .flex()
             .flex_col()
             .when_some(self.archived_banner(cx), |view, banner| view.child(banner))
-            .when(!self.layout.composer_expanded, |view| {
-                view.child(self.transcript_panel(cx))
-            })
             .when_some(self.error.clone(), |view, error| {
                 view.child(div().px_6().py_2().text_color(rgb(0xf0aaaa)).child(error))
             })
             .when_some(self.layout.error.clone(), |view, error| {
                 view.child(div().px_6().py_2().text_color(rgb(0xf0aaaa)).child(error))
             })
-            .child(self.composer(window, cx))
+            .child(self.conversation_panes(window, cx))
             .when_some(
                 self.chat
                     .as_ref()
@@ -307,7 +332,84 @@ impl Workspace {
                     )
                 },
             )
-            .child(self.usage_footer())
+            .child(self.conversation_footer(window, cx))
+            .when(
+                self.layout.composer_split && !self.layout.composer_expanded,
+                |view| {
+                    view.on_drag_move::<layout::SplitResize>(cx.listener(Self::resize_split))
+                        .child(self.split_resize_handle(window))
+                },
+            )
+    }
+
+    fn conversation_footer(&self, window: &Window, cx: &Context<Self>) -> Div {
+        if !self.layout.composer_split || self.layout.composer_expanded {
+            return self.usage_footer();
+        }
+        div()
+            .flex()
+            .flex_shrink_0()
+            .border_t_1()
+            .border_color(rgb(0x383842))
+            .child(
+                div()
+                    .w(self.split_chat_width(window))
+                    .flex_none()
+                    .min_w(px(layout::MIN_CHAT_WIDTH))
+                    .px_5()
+                    .py_2()
+                    .border_r_1()
+                    .border_color(rgb(0x383842))
+                    .flex()
+                    .items_center()
+                    .child(self.usage_statistics()),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(layout::MIN_INPUT_WIDTH))
+                    .px_4()
+                    .py_2()
+                    .flex()
+                    .items_center()
+                    .child(self.composer_controls(cx)),
+            )
+    }
+
+    fn conversation_panes(&self, window: &Window, cx: &Context<Self>) -> Div {
+        let split = self.layout.composer_split && !self.layout.composer_expanded;
+        div()
+            .flex_1()
+            .min_h_0()
+            .min_w_0()
+            .flex()
+            .when(!split, |view| view.flex_col())
+            .when(!self.layout.composer_expanded, |view| {
+                view.child(
+                    self.transcript_panel(cx)
+                        .min_w(px(layout::MIN_CHAT_WIDTH))
+                        .when(split, |view| {
+                            view.flex_none()
+                                .flex_basis(self.split_chat_width(window))
+                                .w(self.split_chat_width(window))
+                                .h_full()
+                                .border_r_1()
+                                .border_color(rgb(0x383842))
+                        }),
+                )
+            })
+            .child(if split {
+                div()
+                    .flex_1()
+                    .min_w(px(layout::MIN_INPUT_WIDTH))
+                    .h_full()
+                    .flex()
+                    .flex_col()
+                    .child(self.composer(window, cx))
+                    .into_any_element()
+            } else {
+                self.composer(window, cx).into_any_element()
+            })
     }
 
     fn archived_banner(&self, cx: &Context<Self>) -> Option<Div> {
@@ -365,9 +467,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::dismiss))
             .on_action(cx.listener(Self::expand_diagram))
             .on_action(|_: &Close, window, _| window.remove_window())
-            .when(self.sidebar.visible, |view| {
-                view.child(self.render_sidebar(window, cx))
-            })
+            .child(self.render_sidebar(window, cx))
             .child(if let Some(file) = &self.file {
                 file.clone().into_any_element()
             } else {
@@ -432,6 +532,20 @@ fn button(id: impl Into<ElementId>, label: impl IntoElement) -> Stateful<Div> {
         .bg(rgb(0x383842))
         .hover(|style| style.bg(rgb(0x494957)))
         .child(label)
+}
+
+fn icon_button(id: impl Into<ElementId>, icon: impl IntoElement) -> Stateful<Div> {
+    div()
+        .id(id)
+        .size(px(28.))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_md()
+        .cursor_pointer()
+        .hover(|style| style.bg(rgb(0x383842)))
+        .child(icon)
 }
 
 fn expansion_button(id: impl Into<ElementId>, expanded: bool) -> Stateful<Div> {

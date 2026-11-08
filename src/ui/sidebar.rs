@@ -1,6 +1,6 @@
 use super::layout::SidebarResize;
 use super::*;
-use space::store::ChatSummary;
+use space::store::{ChatSummary, MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH};
 use std::collections::HashMap;
 
 pub(super) struct SidebarState {
@@ -11,6 +11,7 @@ pub(super) struct SidebarState {
     pub(super) files: bool,
     pub(super) tree: Entity<FileTree>,
     pub(super) visible: bool,
+    pub(super) visibility_changed: bool,
 }
 
 impl SidebarState {
@@ -23,6 +24,7 @@ impl SidebarState {
             files: false,
             tree,
             visible: true,
+            visibility_changed: false,
         }
     }
 
@@ -62,6 +64,11 @@ impl SidebarState {
 }
 
 impl Workspace {
+    fn sidebar_max_width(&self, window: &Window) -> Pixels {
+        (window.viewport_size().width - self.conversation_min_width())
+            .clamp(px(MIN_SIDEBAR_WIDTH), px(MAX_SIDEBAR_WIDTH))
+    }
+
     pub(super) fn new_chat(&mut self, _: &NewChat, window: &mut Window, cx: &mut Context<Self>) {
         if self.rename.is_some() || self.pending_open {
             return;
@@ -78,18 +85,38 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.sidebar.visible = !self.sidebar.visible;
+        self.sidebar.visibility_changed = true;
+        self.chat_menu = None;
         self.sidebar.tree.update(cx, |tree, cx| {
             tree.set_active(self.sidebar.visible && self.sidebar.files, cx)
         });
+        if let Err(error) = self.save_workspace_view(cx) {
+            self.layout.error = Some(format!("Cannot save the workspace view: {error:#}"));
+        }
         cx.notify();
     }
 
+    pub(super) fn sidebar_width(&self, window: &Window) -> Pixels {
+        if self.sidebar.visible {
+            self.layout
+                .sidebar_width
+                .clamp(px(MIN_SIDEBAR_WIDTH), self.sidebar_max_width(window))
+        } else {
+            px(45.)
+        }
+    }
+
     pub(super) fn render_sidebar(&self, window: &Window, cx: &Context<Self>) -> Stateful<Div> {
-        let max_width = (window.viewport_size().width - px(360.)).clamp(px(180.), px(480.));
+        let max_width = self.sidebar_max_width(window);
         div()
             .id("sidebar")
             .relative()
-            .w(self.layout.sidebar_width.clamp(px(180.), max_width))
+            .w(self.sidebar_width(window))
+            .min_w(if self.sidebar.visible {
+                px(MIN_SIDEBAR_WIDTH)
+            } else {
+                px(45.)
+            })
             .flex_shrink_0()
             .h_full()
             .bg(rgb(0x19191d))
@@ -97,43 +124,77 @@ impl Workspace {
             .border_color(rgb(0x303036))
             .flex()
             .flex_col()
-            .on_drag_move::<SidebarResize>(cx.listener(
-                move |this, event: &DragMoveEvent<SidebarResize>, _, cx| {
-                    this.resize_sidebar(event, max_width, cx);
-                },
-            ))
+            .child(self.sidebar_header(cx))
+            .when(self.sidebar.visible, |view| {
+                view.on_drag_move::<SidebarResize>(cx.listener(
+                    move |this, event: &DragMoveEvent<SidebarResize>, _, cx| {
+                        this.resize_sidebar(event, max_width, cx);
+                    },
+                ))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .p_3()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(if self.sidebar.files {
+                            self.sidebar.tree.clone().into_any_element()
+                        } else {
+                            self.chat_list(cx).into_any_element()
+                        })
+                        .when_some(self.sidebar.error.clone(), |view, error| {
+                            view.child(div().text_xs().text_color(rgb(0xf0aaaa)).child(error))
+                        }),
+                )
+                .child(self.sidebar_switcher(cx))
+                .child(
+                    div()
+                        .id("sidebar-resize")
+                        .absolute()
+                        .top_0()
+                        .right_0()
+                        .bottom_0()
+                        .w(px(6.))
+                        .border_r_1()
+                        .border_color(transparent_black())
+                        .cursor(CursorStyle::ResizeLeftRight)
+                        .hover(|style| style.border_color(rgb(0x626270)))
+                        .on_drag(SidebarResize, |_, _, _, cx| cx.new(|_| Empty)),
+                )
+            })
+    }
+
+    fn sidebar_header(&self, cx: &Context<Self>) -> Div {
+        div()
+            .flex()
+            .flex_shrink_0()
+            .items_center()
+            .justify_between()
+            .p_2()
             .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .p_3()
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .child(if self.sidebar.files {
-                        self.sidebar.tree.clone().into_any_element()
-                    } else {
-                        self.chat_list(cx).into_any_element()
-                    })
-                    .when_some(self.sidebar.error.clone(), |view, error| {
-                        view.child(div().text_xs().text_color(rgb(0xf0aaaa)).child(error))
-                    }),
+                icon_button(
+                    "toggle-sidebar",
+                    Icon::Sidebar(!self.sidebar.visible).render(16., 0x9797a5),
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.toggle_sidebar(&ToggleSidebar, window, cx);
+                })),
             )
-            .child(self.sidebar_switcher(cx))
-            .child(
-                div()
-                    .id("sidebar-resize")
-                    .absolute()
-                    .top_0()
-                    .right_0()
-                    .bottom_0()
-                    .w(px(6.))
-                    .border_r_1()
-                    .border_color(transparent_black())
-                    .cursor(CursorStyle::ResizeLeftRight)
-                    .hover(|style| style.border_color(rgb(0x626270)))
-                    .on_drag(SidebarResize, |_, _, _, cx| cx.new(|_| Empty)),
-            )
+            .when(self.sidebar.visible, |view| {
+                view.child(
+                    button("new-chat", new_chat_icon())
+                        .px_2()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .child("New")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.new_chat(&NewChat, window, cx);
+                        })),
+                )
+            })
     }
 
     fn sidebar_switcher(&self, cx: &Context<Self>) -> Stateful<Div> {
@@ -191,46 +252,27 @@ impl Workspace {
             .flex_col()
             .gap_2()
             .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap_y_1()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div().flex().gap_1().children(
-                            [
-                                ("active-chats", "Chats", false),
-                                ("archived-chats", "Archived", true),
-                            ]
-                            .into_iter()
-                            .map(|(id, label, archived)| {
-                                button(id, label)
-                                    .px_2()
-                                    .bg(rgb(if self.sidebar.archived == archived {
-                                        0x383842
-                                    } else {
-                                        0x19191d
-                                    }))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.sidebar.archived = archived;
-                                        this.chat_menu = None;
-                                        cx.notify();
-                                    }))
-                            }),
-                        ),
-                    )
-                    .child(
-                        button("new-chat", new_chat_icon())
+                div().flex().gap_1().children(
+                    [
+                        ("active-chats", "Chats", false),
+                        ("archived-chats", "Archived", true),
+                    ]
+                    .into_iter()
+                    .map(|(id, label, archived)| {
+                        button(id, label)
                             .px_2()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .child("New")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.new_chat(&NewChat, window, cx)
-                            })),
-                    ),
+                            .bg(rgb(if self.sidebar.archived == archived {
+                                0x383842
+                            } else {
+                                0x19191d
+                            }))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.sidebar.archived = archived;
+                                this.chat_menu = None;
+                                cx.notify();
+                            }))
+                    }),
+                ),
             )
             .child(
                 div()

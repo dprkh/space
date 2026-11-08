@@ -26,6 +26,21 @@ pub enum Command {
         text: String,
         pdfs: Vec<Pdf>,
     },
+    EditMessage {
+        chat_id: Uuid,
+        submission_id: Uuid,
+        content_index: usize,
+        text: String,
+    },
+    SelectMessageVersion {
+        chat_id: Uuid,
+        content_index: usize,
+        version: usize,
+    },
+    DeleteMessage {
+        chat_id: Uuid,
+        content_index: usize,
+    },
     Retry(Uuid),
     Stop(Uuid),
     Rename {
@@ -85,6 +100,11 @@ pub enum Event {
     },
     Error(String),
     UiSettings(UiSettings),
+    WorkspaceView(Result<Option<String>, String>),
+    ChatView {
+        chat_id: Uuid,
+        result: Result<Option<String>, String>,
+    },
     SettingsError(String),
     SidebarError(String),
     Directory {
@@ -100,6 +120,9 @@ pub enum Event {
 
 pub enum SidebarCommand {
     SaveSettings(UiSettings),
+    SaveWorkspaceView(String),
+    SaveChatView { chat_id: Uuid, json: String },
+    LoadChatView(Uuid),
     WatchDirectories(Vec<PathBuf>),
     OpenFile { request_id: Uuid, path: PathBuf },
     CloseFile,
@@ -146,8 +169,17 @@ impl Worker {
                         );
                         // Save pending layout changes before the worker exits.
                         while let Ok(command) = sidebar_receiver.try_recv() {
-                            if let SidebarCommand::SaveSettings(settings) = command {
-                                store.save_ui_settings(settings)?;
+                            match command {
+                                SidebarCommand::SaveSettings(settings) => {
+                                    store.save_ui_settings(settings)?
+                                }
+                                SidebarCommand::SaveWorkspaceView(json) => {
+                                    store.save_workspace_view(&json)?
+                                }
+                                SidebarCommand::SaveChatView { chat_id, json } => {
+                                    store.save_chat_view(chat_id, &json)?
+                                }
+                                _ => {}
                             }
                         }
                         result

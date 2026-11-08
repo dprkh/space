@@ -3,6 +3,14 @@ use space::model::CONTEXT_WINDOW_TOKENS;
 
 impl Workspace {
     pub(super) fn usage_footer(&self) -> Div {
+        div()
+            .px_5()
+            .pb_3()
+            .flex_shrink_0()
+            .child(self.usage_statistics())
+    }
+
+    pub(super) fn usage_statistics(&self) -> Div {
         let usage = self
             .chat
             .as_ref()
@@ -30,8 +38,7 @@ impl Workspace {
             },
         );
         div()
-            .px_5()
-            .pb_3()
+            .min_w_0()
             .flex()
             .flex_wrap()
             .gap_x_3()

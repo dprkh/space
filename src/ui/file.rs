@@ -1,4 +1,5 @@
 use super::*;
+use serde::{Deserialize, Serialize};
 use space::project::FileContent;
 use std::{cell::OnceCell, ops::Range, path::PathBuf, sync::Arc};
 
@@ -34,6 +35,14 @@ pub(super) struct FileView {
     error: Option<String>,
     watch_error: Option<String>,
     scroll: UniformListScrollHandle,
+    pending_scroll: Option<Point<Pixels>>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub(super) struct SavedFile {
+    pub(super) path: PathBuf,
+    x: f32,
+    y: f32,
 }
 
 struct SourceDocument {
@@ -176,7 +185,26 @@ impl FileView {
             error: None,
             watch_error: None,
             scroll: UniformListScrollHandle::new(),
+            pending_scroll: None,
         }
+    }
+
+    pub(super) fn saved_state(&self) -> SavedFile {
+        let offset = self
+            .pending_scroll
+            .unwrap_or_else(|| self.scroll.0.borrow().base_handle.offset());
+        SavedFile {
+            path: self.path.clone(),
+            x: offset.x.into(),
+            y: offset.y.into(),
+        }
+    }
+
+    pub(super) fn restore_scroll(&mut self, state: SavedFile, cx: &mut Context<Self>) {
+        if state.x.is_finite() && state.y.is_finite() {
+            self.pending_scroll = Some(point(px(state.x), px(state.y)));
+        }
+        cx.notify();
     }
 
     pub(super) fn matches(&self, request_id: Uuid, path: &std::path::Path) -> bool {
@@ -269,6 +297,14 @@ impl FileView {
 
 impl Render for FileView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.document.is_some()
+            && let Some(offset) = self.pending_scroll.take()
+        {
+            cx.on_next_frame(window, move |this, _, cx| {
+                this.scroll.0.borrow().base_handle.set_offset(offset);
+                cx.notify();
+            });
+        }
         self.prepare_viewport(window);
         div()
             .key_context("FileView")

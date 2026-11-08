@@ -267,8 +267,11 @@ impl Run<'_> {
         chat.partial.clear();
         chat.partial_thoughts.clear();
         let content_index = chat.contents.len();
-        chat.contents.push(generation.content);
-        chat.response_models.insert(content_index, self.model);
+        // An empty completion ends the turn without adding an empty API message.
+        if !generation.content.parts.is_empty() {
+            chat.contents.push(generation.content);
+            chat.response_models.insert(content_index, self.model);
+        }
         chat.record_activity();
         // Save calls and signatures before any file operation starts.
         self.store.save(&mut chat)?;

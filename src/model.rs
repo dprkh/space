@@ -1,3 +1,5 @@
+mod branches;
+
 use std::{
     collections::BTreeMap,
     time::{SystemTime, UNIX_EPOCH},
@@ -116,6 +118,15 @@ pub enum Role {
 }
 
 impl Content {
+    pub fn is_user_message(&self) -> bool {
+        self.role == Role::User
+            && !self
+                .parts
+                .iter()
+                .any(|part| part.get("functionResponse").is_some())
+            && !self.parts.is_empty()
+    }
+
     pub fn text(role: Role, text: &str) -> Self {
         Self {
             role,
@@ -230,6 +241,8 @@ pub struct Chat {
     pub tools: Value,
     pub contents: Vec<Content>,
     #[serde(default)]
+    branches: branches::Branches,
+    #[serde(default)]
     pub file_changes: Vec<ToolChange>,
     pub usage: Usage,
     // Keep the latest request separate from cumulative usage.
@@ -270,6 +283,7 @@ impl Default for Chat {
             system: SYSTEM.into(),
             tools: crate::project::declarations(),
             contents: Vec::new(),
+            branches: branches::Branches::default(),
             file_changes: Vec::new(),
             usage: Usage::default(),
             context_tokens: None,
@@ -323,10 +337,10 @@ impl Chat {
     pub fn push_user(&mut self, text: &str, pdfs: Vec<Pdf>) {
         self.begin_run();
         if self.contents.is_empty() && !self.title_is_custom {
-            let title = if text.is_empty() {
+            let title = if text.trim().is_empty() {
                 pdfs.first().map_or("New chat", Pdf::name)
             } else {
-                text
+                text.trim()
             };
             self.title = title
                 .lines()

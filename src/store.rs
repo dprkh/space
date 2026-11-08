@@ -1,3 +1,4 @@
+mod views;
 mod write;
 
 use std::{cell::RefCell, path::Path};
@@ -34,19 +35,27 @@ pub struct Preferences {
 }
 pub const MIN_COMPOSER_HEIGHT: f32 = 96.;
 pub const MAX_COMPOSER_HEIGHT: f32 = 1200.;
+pub const MIN_SIDEBAR_WIDTH: f32 = 240.;
+pub const MAX_SIDEBAR_WIDTH: f32 = 480.;
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UiSettings {
     pub sidebar_width: f32,
     pub composer_height: f32,
+    pub composer_split: bool,
+    pub composer_expanded: bool,
+    pub chat_fraction: f32,
 }
 
 impl Default for UiSettings {
     fn default() -> Self {
         Self {
-            sidebar_width: 232.,
+            sidebar_width: MIN_SIDEBAR_WIDTH,
             composer_height: 144.,
+            composer_split: false,
+            composer_expanded: false,
+            chat_fraction: 0.5,
         }
     }
 }
@@ -55,11 +64,17 @@ impl UiSettings {
     fn validated(self) -> Result<Self> {
         ensure!(self.sidebar_width.is_finite(), "Invalid sidebar width");
         ensure!(self.composer_height.is_finite(), "Invalid input height");
+        ensure!(self.chat_fraction.is_finite(), "Invalid chat pane width");
         Ok(Self {
-            sidebar_width: self.sidebar_width.clamp(180., 480.),
+            sidebar_width: self
+                .sidebar_width
+                .clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH),
             composer_height: self
                 .composer_height
                 .clamp(MIN_COMPOSER_HEIGHT, MAX_COMPOSER_HEIGHT),
+            composer_split: self.composer_split,
+            composer_expanded: self.composer_expanded,
+            chat_fraction: self.chat_fraction.clamp(0.1, 0.9),
         })
     }
 }
@@ -147,6 +162,11 @@ impl Store {
                 .into_iter()
                 .map(|cache| CacheCleanup { chat_id: id, cache }),
         );
+        if let Err(error) = self.chats.remove_file(format!("{id}.view.json"))
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(error).context("Cannot delete the saved chat view");
+        }
         self.chats.try_clone()?.into_std_file().sync_all()?;
         Ok(())
     }
@@ -183,10 +203,8 @@ impl Store {
     }
 
     pub fn create_chat(&self) -> Result<Chat> {
-        let mut chat = Chat {
-            model: self.preferences()?.default_model.id().into(),
-            ..Chat::default()
-        };
+        let mut chat = Chat::default();
+        chat.model = self.preferences()?.default_model.id().into();
         self.save(&mut chat)?;
         Ok(chat)
     }
@@ -227,7 +245,7 @@ impl Store {
         )?;
         let chat: Chat = serde_json::from_str(&text).context("Cannot read saved chat")?;
         ensure!(
-            chat.version == 1,
+            matches!(chat.version, 1 | 2),
             "Unsupported chat version: {}",
             chat.version
         );

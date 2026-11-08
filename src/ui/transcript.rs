@@ -3,6 +3,7 @@ use super::{
     diff::FileDiff,
     markdown::{CachedText, Markdown},
 };
+use serde::{Deserialize, Serialize};
 use space::model::Role;
 use std::collections::{HashMap, HashSet};
 
@@ -21,6 +22,7 @@ enum TranscriptRow {
     Thinking(usize),
     Thought(usize, usize),
     Model(usize, usize),
+    MessageControls(usize),
     Tool(usize, usize, SharedString),
     Diff(usize, usize, usize),
     Notice,
@@ -34,6 +36,7 @@ impl TranscriptRow {
             | Self::Thinking(index)
             | Self::Thought(index, _)
             | Self::Model(index, _)
+            | Self::MessageControls(index)
             | Self::Tool(index, ..)
             | Self::Diff(index, ..) => *index,
             Self::Notice => usize::MAX,
@@ -50,6 +53,7 @@ impl TranscriptRow {
             Self::Thinking(index) => (5, *index, 0),
             Self::Thought(index, block) => (6, *index, *block),
             Self::Diff(_, change, block) => (7, *change, *block),
+            Self::MessageControls(index) => (8, *index, 0),
         }
     }
 }
@@ -66,7 +70,70 @@ pub(super) struct TranscriptState {
     pub(super) follow_output: bool,
 }
 
+#[derive(Deserialize, Serialize)]
+pub(super) struct SavedTranscript {
+    branch: Option<Uuid>,
+    collapsed_thoughts: HashSet<usize>,
+    collapsed_changes: HashSet<usize>,
+    scroll_key: Option<(u8, usize, usize)>,
+    item_index: usize,
+    offset: f32,
+    follow_output: bool,
+}
+
 impl TranscriptState {
+    pub(super) fn saved_state(&self, chat: &Chat) -> SavedTranscript {
+        let scroll = self.list.logical_scroll_top();
+        SavedTranscript {
+            branch: chat.active_branch(),
+            collapsed_thoughts: self.collapsed_thoughts.clone(),
+            collapsed_changes: self.collapsed_changes.clone(),
+            scroll_key: self.rows.get(scroll.item_ix).map(TranscriptRow::key),
+            item_index: scroll.item_ix,
+            offset: scroll.offset_in_item.into(),
+            follow_output: self.follow_output,
+        }
+    }
+
+    pub(super) fn restore_state(&mut self, state: SavedTranscript, chat: &Chat) {
+        if state.branch != chat.active_branch() {
+            return;
+        }
+        self.collapsed_thoughts = state
+            .collapsed_thoughts
+            .into_iter()
+            .filter(|&index| {
+                chat.contents
+                    .get(index)
+                    .is_some_and(|content| content.role == Role::Model)
+                    || (index == chat.contents.len() && !chat.partial_thoughts.is_empty())
+            })
+            .collect();
+        self.collapsed_changes = state
+            .collapsed_changes
+            .into_iter()
+            .filter(|&index| index < self.diffs.len())
+            .collect();
+        self.follow_output = state.follow_output;
+        self.refresh_rows(chat, 0, true);
+        if !self.follow_output {
+            let item_ix = self
+                .rows
+                .iter()
+                .position(|row| Some(row.key()) == state.scroll_key)
+                .unwrap_or(state.item_index.min(self.rows.len()));
+            let offset = if state.offset.is_finite() {
+                state.offset.max(0.)
+            } else {
+                0.
+            };
+            self.list.scroll_to(ListOffset {
+                item_ix,
+                offset_in_item: px(offset),
+            });
+        }
+    }
+
     pub(super) fn update_snapshot(
         &mut self,
         previous_chat: Option<&Chat>,
@@ -74,7 +141,8 @@ impl TranscriptState {
         opened: bool,
         cx: &mut App,
     ) -> (usize, bool) {
-        let changed = previous_chat.is_none_or(|old| old.id != chat.id);
+        let changed = previous_chat
+            .is_none_or(|old| old.id != chat.id || old.active_branch() != chat.active_branch());
         let mut changed_content = previous_chat.filter(|_| !changed).map_or(0, |old| {
             old.contents
                 .iter()
@@ -182,6 +250,16 @@ impl TranscriptState {
 }
 
 impl TranscriptState {
+    pub(super) fn show_message_controls(&mut self, content_index: usize) {
+        let Some(item_ix) = self.rows.iter().position(
+            |row| matches!(row, TranscriptRow::MessageControls(index) if *index == content_index),
+        ) else {
+            return;
+        };
+        self.follow_output = false;
+        self.list.scroll_to_reveal_item(item_ix);
+    }
+
     pub(super) fn follow_latest(&mut self) {
         self.follow_output = true;
         self.list.scroll_to(ListOffset {
@@ -218,6 +296,7 @@ impl TranscriptState {
     fn build_rows(&self, chat: &Chat, changed_content: usize, stable: usize) -> Vec<TranscriptRow> {
         let mut rows = self.rows[..stable].to_vec();
         for (content_index, content) in chat.contents.iter().enumerate().skip(changed_content) {
+            let start = rows.len();
             if content.role == Role::Model {
                 self.model_rows(content_index, &self.markdown[content_index], &mut rows);
             } else {
@@ -250,8 +329,15 @@ impl TranscriptState {
                     }
                 }
             }
+            if rows.len() > start {
+                rows.push(TranscriptRow::MessageControls(content_index));
+            }
         }
+        let start = rows.len();
         self.model_rows(chat.contents.len(), &self.partial_markdown, &mut rows);
+        if rows.len() > start {
+            rows.push(TranscriptRow::MessageControls(chat.contents.len()));
+        }
         if chat.notice.is_some() {
             rows.push(TranscriptRow::Notice);
         }
@@ -376,6 +462,9 @@ impl Workspace {
             TranscriptRow::Model(content_index, block) => {
                 self.model_row(chat, content_index, block)
             }
+            TranscriptRow::MessageControls(content_index) => {
+                self.message_controls_row(chat, content_index, cx)
+            }
             TranscriptRow::Tool(content_index, part_index, label) => {
                 self.tool_row(content_index, part_index, label, previous_is_tool, cx)
             }
@@ -391,7 +480,7 @@ impl Workspace {
                 "message-{}-{content_index}",
                 chat.id
             )))
-            .pb_6()
+            .pb_2()
             .child(
                 div()
                     .mb_2()
@@ -401,6 +490,98 @@ impl Workspace {
             )
             .child(div().text_size(px(14.)).line_height(px(23.)).child(text))
             .into_any_element()
+    }
+
+    fn message_controls_row(
+        &self,
+        chat: &Chat,
+        content_index: usize,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let controls = if chat
+            .contents
+            .get(content_index)
+            .is_some_and(|content| content.role == Role::User)
+        {
+            self.user_message_controls(chat, content_index, cx)
+        } else {
+            self.message_actions(chat, content_index, cx)
+        };
+        div()
+            .id(SharedString::from(format!(
+                "message-controls-{}-{content_index}",
+                chat.id
+            )))
+            .w_full()
+            .flex()
+            .justify_end()
+            .pb_6()
+            .child(controls)
+            .into_any_element()
+    }
+
+    fn user_message_controls(&self, chat: &Chat, content_index: usize, cx: &Context<Self>) -> Div {
+        let enabled = self.can_change_branch();
+        div()
+            .flex()
+            .flex_wrap()
+            .flex_shrink_0()
+            .max_w_full()
+            .items_center()
+            .justify_end()
+            .gap_1()
+            .when_some(
+                chat.message_versions(content_index),
+                |view, (selected, count)| {
+                    view.child(self.message_version_controls(content_index, selected, count, cx))
+                },
+            )
+            .when(!chat.archived, |view| {
+                view.child(
+                    icon_button("edit-message", Icon::Pencil.render(14., 0x9797a5))
+                        .when(!enabled, |view| view.opacity(0.3).cursor_default())
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.start_message_edit(content_index, window, cx);
+                        })),
+                )
+            })
+            .child(self.message_actions(chat, content_index, cx))
+    }
+
+    fn message_version_controls(
+        &self,
+        content_index: usize,
+        selected: usize,
+        count: usize,
+        cx: &Context<Self>,
+    ) -> Div {
+        let enabled = self.can_change_branch();
+        div()
+            .flex()
+            .flex_shrink_0()
+            .items_center()
+            .gap_1()
+            .child(
+                icon_button("previous-version", Icon::ChevronLeft.render(12., 0x9797a5))
+                    .when(!enabled || selected == 0, |view| {
+                        view.opacity(0.3).cursor_default()
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if selected > 0 {
+                            this.select_message_version(content_index, selected - 1, cx);
+                        }
+                    })),
+            )
+            .child(format!("{} / {count}", selected + 1))
+            .child(
+                icon_button("next-version", Icon::ChevronRight.render(12., 0x9797a5))
+                    .when(!enabled || selected + 1 >= count, |view| {
+                        view.opacity(0.3).cursor_default()
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.select_message_version(content_index, selected + 1, cx);
+                    })),
+            )
     }
 
     fn model_header_row(
@@ -486,7 +667,7 @@ impl Workspace {
                 chat.id
             )))
             .pb(if block + 1 == markdown.block_count() {
-                px(24.)
+                px(8.)
             } else {
                 px(12.)
             })

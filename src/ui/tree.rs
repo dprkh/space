@@ -29,6 +29,18 @@ pub struct FileTree {
 impl EventEmitter<OpenFile> for FileTree {}
 
 impl FileTree {
+    pub(super) fn expanded_directories(&self) -> Vec<PathBuf> {
+        let mut paths: Vec<_> = self.expanded.iter().cloned().collect();
+        paths.sort();
+        paths
+    }
+
+    pub(super) fn restore_expanded(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        self.expanded = paths.into_iter().collect();
+        self.watch(cx);
+        cx.notify();
+    }
+
     pub fn new(commands: Sender<SidebarCommand>) -> Self {
         Self {
             commands,

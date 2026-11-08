@@ -2,14 +2,14 @@ use super::*;
 use space::model::Model;
 
 impl Workspace {
-    pub(super) fn event(&mut self, event: Event, cx: &mut Context<Self>) {
+    pub(super) fn event(&mut self, event: Event, window: &mut Window, cx: &mut Context<Self>) {
         match event {
             Event::SendResult {
                 chat_id,
                 submission_id,
                 result,
             } => {
-                self.complete_send(chat_id, submission_id, result, cx);
+                self.complete_send(chat_id, submission_id, result, window, cx);
             }
             Event::Chats(chats) => self.sidebar.replace_chats(chats),
             Event::Activity {
@@ -44,6 +44,10 @@ impl Workspace {
                 error,
             } => self.apply_run_error(chat_id, run_id, error),
             Event::UiSettings(settings) => self.layout.apply_settings(settings),
+            Event::WorkspaceView(result) => self.restore_workspace_view(result, window, cx),
+            Event::ChatView { chat_id, result } => {
+                self.restore_chat_view(chat_id, result, window, cx)
+            }
             Event::SettingsError(error) => self.layout.error = Some(error),
             Event::SidebarError(error) => {
                 if let Some(file) = &self.file {
@@ -69,6 +73,7 @@ impl Workspace {
             Event::Error(error) => {
                 self.error = Some(error);
                 self.pending_open = false;
+                self.pending_message_version = None;
                 self.waiting = false;
             }
         }
@@ -99,11 +104,15 @@ impl Workspace {
         {
             return;
         }
-        if self.chat.is_none() {
+        if self.chat.is_none() && !self.workspace_view_loaded {
             self.sidebar.archived = chat.archived;
         }
         if opened {
             self.pending_open = false;
+        }
+        let changed_chat = self.chat.as_ref().is_none_or(|old| old.id != chat.id);
+        if changed_chat && let Err(error) = self.save_chat_view(cx) {
+            self.layout.error = Some(format!("Cannot save the previous input: {error:#}"));
         }
         let previous_chat = self.chat.take();
         let (changed_content, changed) =
@@ -112,15 +121,33 @@ impl Workspace {
         if changed {
             self.close_diagram(cx);
             self.model_menu = None;
+        }
+        if changed_chat {
             self.attachments = Default::default();
             self.submission = None;
+            self.message_edit = None;
+            self.pending_message_version = None;
             self.input.update(cx, |input, cx| input.clear(cx));
+            self.view_loaded = None;
+            self.restoring_view = Some(chat.id);
+            if self
+                .sidebar_commands
+                .try_send(SidebarCommand::LoadChatView(chat.id))
+                .is_err()
+            {
+                self.restoring_view = None;
+                self.layout.error =
+                    Some("Cannot load the saved input: the worker is unavailable".into());
+            }
         }
         if !self.pending_open {
-            self.waiting = false;
+            self.waiting = self.restoring_view.is_some();
         }
         self.chat = Some(chat);
         self.refresh_rows(changed_content, changed);
+        if opened && let Some(content_index) = self.pending_message_version.take() {
+            self.transcript.show_message_controls(content_index);
+        }
     }
 
     fn apply_delta(&mut self, chat_id: Uuid, run_id: Uuid, text: String, cx: &mut Context<Self>) {
