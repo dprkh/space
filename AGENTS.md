@@ -4,6 +4,10 @@
 
 - Use ASD-STE100 when addressing the user. Use it from memory. Do not look it up.
 
+## Documentation
+
+- Do not change `README.md`.
+
 ## Code quality
 
 - Keep Rust code idiomatic, clean, and minimal.
