@@ -61,7 +61,7 @@ impl TranscriptRow {
 pub(super) struct TranscriptState {
     markdown: Vec<MessageText>,
     pub(super) partial_markdown: MessageText,
-    collapsed_thoughts: HashSet<usize>,
+    expanded_thoughts: HashSet<usize>,
     diffs: Vec<FileDiff>,
     change_indices: HashMap<(usize, usize), usize>,
     collapsed_changes: HashSet<usize>,
@@ -73,7 +73,8 @@ pub(super) struct TranscriptState {
 #[derive(Deserialize, Serialize)]
 pub(super) struct SavedTranscript {
     branch: Option<Uuid>,
-    collapsed_thoughts: HashSet<usize>,
+    #[serde(default)]
+    expanded_thoughts: HashSet<usize>,
     collapsed_changes: HashSet<usize>,
     scroll_key: Option<(u8, usize, usize)>,
     item_index: usize,
@@ -86,7 +87,7 @@ impl TranscriptState {
         let scroll = self.list.logical_scroll_top();
         SavedTranscript {
             branch: chat.active_branch(),
-            collapsed_thoughts: self.collapsed_thoughts.clone(),
+            expanded_thoughts: self.expanded_thoughts.clone(),
             collapsed_changes: self.collapsed_changes.clone(),
             scroll_key: self.rows.get(scroll.item_ix).map(TranscriptRow::key),
             item_index: scroll.item_ix,
@@ -99,8 +100,8 @@ impl TranscriptState {
         if state.branch != chat.active_branch() {
             return;
         }
-        self.collapsed_thoughts = state
-            .collapsed_thoughts
+        self.expanded_thoughts = state
+            .expanded_thoughts
             .into_iter()
             .filter(|&index| {
                 chat.contents
@@ -151,7 +152,7 @@ impl TranscriptState {
                 .unwrap_or(old.contents.len().min(chat.contents.len()))
         });
         if changed {
-            self.collapsed_thoughts.clear();
+            self.expanded_thoughts.clear();
             self.collapsed_changes.clear();
         }
         if changed || opened || chat.file_changes.len() < self.diffs.len() {
@@ -168,7 +169,7 @@ impl TranscriptState {
             changed_content = changed_content.min(change.content_index);
         }
         self.update_markdown(previous_chat, chat, changed_content, changed, cx);
-        self.collapsed_thoughts.retain(|&index| {
+        self.expanded_thoughts.retain(|&index| {
             chat.contents
                 .get(index)
                 .is_some_and(|content| content.role == Role::Model)
@@ -238,7 +239,7 @@ impl TranscriptState {
         Self {
             markdown: Vec::new(),
             partial_markdown: MessageText::default(),
-            collapsed_thoughts: HashSet::new(),
+            expanded_thoughts: HashSet::new(),
             diffs: Vec::new(),
             change_indices: HashMap::new(),
             collapsed_changes: HashSet::new(),
@@ -275,7 +276,7 @@ impl TranscriptState {
         rows.push(TranscriptRow::ModelHeader(content_index));
         if text.thoughts.block_count() > 0 {
             rows.push(TranscriptRow::Thinking(content_index));
-            if !self.collapsed_thoughts.contains(&content_index) {
+            if self.expanded_thoughts.contains(&content_index) {
                 rows.extend(
                     (0..text.thoughts.block_count())
                         .map(|block| TranscriptRow::Thought(content_index, block)),
@@ -421,8 +422,8 @@ impl Workspace {
     }
 
     pub(super) fn toggle_thoughts(&mut self, content_index: usize, cx: &mut Context<Self>) {
-        if !self.transcript.collapsed_thoughts.remove(&content_index) {
-            self.transcript.collapsed_thoughts.insert(content_index);
+        if !self.transcript.expanded_thoughts.remove(&content_index) {
+            self.transcript.expanded_thoughts.insert(content_index);
         }
         self.transcript.follow_output = false;
         self.refresh_rows(content_index, false);
@@ -605,7 +606,7 @@ impl Workspace {
     }
 
     fn thinking_row(&self, chat: &Chat, content_index: usize, cx: &Context<Self>) -> AnyElement {
-        let expanded = !self.transcript.collapsed_thoughts.contains(&content_index);
+        let expanded = self.transcript.expanded_thoughts.contains(&content_index);
         let active = content_index == chat.contents.len()
             && chat.status == Status::Running
             && chat.partial.is_empty();

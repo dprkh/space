@@ -364,12 +364,13 @@ fn render_code_block(language: &str, text: RichTextView) -> Div {
                 .id("code")
                 .min_w_0()
                 .overflow_x_scroll()
+                .flex()
                 .p_3()
                 .font_family("Menlo")
                 .text_size(px(13.))
                 .line_height(px(21.))
                 .whitespace_nowrap()
-                .child(text),
+                .child(div().flex_shrink_0().child(text)),
         )
 }
 

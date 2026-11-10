@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use crate::pdf::Pdf;
 
-pub const MODEL: &str = "gemini-4-argon";
+pub const MODEL: &str = "gemini-4-carbon";
 pub const CONTEXT_WINDOW_TOKENS: u64 = 1_048_576;
 pub const SYSTEM: &str = "\
 Do not use LaTeX.
@@ -20,6 +20,8 @@ Mermaid diagrams are supported in fenced `mermaid` code blocks.";
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Model {
     #[default]
+    #[serde(rename = "gemini-4-carbon")]
+    Carbon,
     #[serde(rename = "gemini-4-argon")]
     Argon,
     #[serde(rename = "gemini-3.8-flash")]
@@ -39,7 +41,7 @@ pub struct Prices {
 }
 
 impl Model {
-    pub const ALL: [Self; 2] = [Self::Argon, Self::Flash38];
+    pub const ALL: [Self; 3] = [Self::Carbon, Self::Argon, Self::Flash38];
 
     pub fn from_id(id: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|model| model.id() == id)
@@ -47,13 +49,15 @@ impl Model {
 
     pub fn id(self) -> &'static str {
         match self {
-            Self::Argon => MODEL,
+            Self::Carbon => MODEL,
+            Self::Argon => "gemini-4-argon",
             Self::Flash38 => "gemini-3.8-flash",
         }
     }
 
     pub fn name(self) -> &'static str {
         match self {
+            Self::Carbon => "Gemini 4 Carbon",
             Self::Argon => "Gemini 4 Argon",
             Self::Flash38 => "Gemini 3.8 Flash",
         }
@@ -61,6 +65,7 @@ impl Model {
 
     pub fn label(self) -> &'static str {
         match self {
+            Self::Carbon => "GEMINI 4 CARBON",
             Self::Argon => "GEMINI 4 ARGON",
             Self::Flash38 => "GEMINI 3.8 FLASH",
         }
@@ -68,14 +73,14 @@ impl Model {
 
     pub fn explicit_cache_minimum(self) -> Option<u64> {
         match self {
-            Self::Argon => None,
+            Self::Carbon | Self::Argon => None,
             Self::Flash38 => Some(4_096),
         }
     }
 
     pub fn context_tokens(self, usage: Usage) -> u64 {
         match self {
-            Self::Argon => usage.context_tokens(),
+            Self::Carbon | Self::Argon => usage.context_tokens(),
             Self::Flash38 => usage.input,
         }
     }
@@ -83,7 +88,7 @@ impl Model {
     pub fn prices(self, timestamp: u64) -> Prices {
         // Standard rates: https://ai.google.dev/gemini-api/docs/pricing
         let (input, cached, output, storage, end) = match self {
-            Self::Argon => (2., 0.10, 10., 0., 1_796_083_200_000),
+            Self::Carbon | Self::Argon => (2., 0.10, 10., 0., 1_796_083_200_000),
             Self::Flash38 => (0.75, 0.075, 3.75, 0.50, 1_798_761_600_000),
         };
         let multiplier = if timestamp < end { 1. } else { 2. };
@@ -222,6 +227,11 @@ pub struct ToolChange {
     pub change: FileChange,
 }
 
+// Chats saved before model metadata was added used Argon.
+fn legacy_model() -> Model {
+    Model::Argon
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Chat {
     pub version: u32,
@@ -235,7 +245,7 @@ pub struct Chat {
     pub model: String,
     #[serde(default)]
     pub response_models: BTreeMap<usize, Model>,
-    #[serde(default)]
+    #[serde(default = "legacy_model")]
     pub partial_model: Model,
     pub system: String,
     pub tools: Value,
@@ -248,7 +258,7 @@ pub struct Chat {
     // Keep the latest request separate from cumulative usage.
     #[serde(default)]
     pub context_tokens: Option<u64>,
-    #[serde(default)]
+    #[serde(default = "legacy_model")]
     pub context_model: Model,
     #[serde(default)]
     pub cost_usd: Option<f64>,
@@ -318,7 +328,7 @@ impl Chat {
             self.response_models
                 .get(&content_index)
                 .copied()
-                .unwrap_or_default()
+                .unwrap_or(Model::Argon)
         }
     }
 
